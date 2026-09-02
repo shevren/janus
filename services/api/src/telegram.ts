@@ -308,6 +308,7 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
       let output = "";
       let phase: "think" | "search" | "found" | "extract" = "think";
       let sources = 0;
+      let sentFiles = 0;
       let done = false;
       const statusText = () => {
         if (phase === "think") return "Думаю...";
@@ -340,6 +341,19 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
             }
             if (e.type === "tool" && e.status === "ok" && ["read_page", "wiki", "workspace_read"].includes(e.name ?? "")) {
               phase = "extract";
+            }
+            if (e.type === "tool" && e.status === "ok" && ["generate_image", "render_latex", "make_presentation", "edit_image"].includes(e.name ?? "")) {
+              const m = e.output?.match(/\/workspace\/([^\s]+\.(?:png|jpg|jpeg|pdf|pptx|zip|txt|py|js|html|md))/i);
+              if (m && sentFiles < 3) {
+                const rel = m[1];
+                try {
+                  const buf = box.readBytes(userId.user_id, rel);
+                  const name = rel.split("/").pop() ?? "file";
+                  const isImg = /\.(png|jpg|jpeg|gif)$/i.test(name);
+                  void (isImg ? sendPhoto(chatId, buf, name) : sendDocument(chatId, buf, name));
+                  sentFiles++;
+                } catch { /* ignore */ }
+              }
             }
             if (e.type === "text" && e.text) output += e.text;
           },
