@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { parseMode, runAgent, type AgentEvent } from "./agent.js";
+import { parseMode, runAgent, type AgentEvent, type AgentMode } from "./agent.js";
 import { config } from "./config.js";
 import { q, q1 } from "./db.js";
 import * as box from "./sandbox.js";
@@ -113,7 +113,7 @@ async function send(chatId: number, text: string, extra: Record<string, unknown>
 async function sendPhoto(chatId: number, photo: Buffer, caption?: string, extra: Record<string, unknown> = {}) {
   const form = new FormData();
   form.append("chat_id", String(chatId));
-  form.append("photo", new Blob([photo], { type: "image/png" }), "photo.png");
+  form.append("photo", new Blob([new Uint8Array(photo)], { type: "image/png" }), "photo.png");
   if (caption) form.append("caption", caption);
   for (const [k, v] of Object.entries(extra)) form.append(k, String(v));
   const r = await fetch(`https://api.telegram.org/bot${token()}/sendPhoto`, {
@@ -127,7 +127,7 @@ async function sendPhoto(chatId: number, photo: Buffer, caption?: string, extra:
 async function sendDocument(chatId: number, doc: Buffer, filename: string, caption?: string) {
   const form = new FormData();
   form.append("chat_id", String(chatId));
-  form.append("document", new Blob([doc]), filename);
+  form.append("document", new Blob([new Uint8Array(doc)]), filename);
   if (caption) form.append("caption", caption);
   const r = await fetch(`https://api.telegram.org/bot${token()}/sendDocument`, {
     method: "POST",
@@ -263,11 +263,8 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
   const fromId = msg.from?.id;
   const userId = fromId ? await q1<{ user_id: string }>(`select user_id from telegram_accounts where telegram_user_id = $1`, [fromId]) : null;
   
-  // Delete command message immediately (privacy)
   await deleteMessage(chatId, msg.message_id);
-  
-  // Show typing indicator
-  const thinking = await tg("sendMessage", { chat_id: chatId, text: "🤔 Думаю..." });
+  const thinking = await tg("sendMessage", { chat_id: chatId, text: "Думаю..." }) as { message_id?: number } | undefined;
   const thinkingId = thinking?.message_id;
   
   try {
@@ -284,71 +281,59 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
       return;
     }
 
-    switch (cmd) {
-      case "/help": {
-        if (thinkingId) await deleteMessage(chatId, thinkingId);
-        const help = `Janus — your cloud computer.
-
-Commands:
-/ask <question> — answer with tools
-/plan <task> — short numbered plan  
-/build <task> — execute with tools
-/model <name> — switch AI model (DM only)
-/fill <doc> — fill table from photo/doc
-/code <file> — run code on server
-/photo <prompt> — generate image
-/pptx <topic> — create presentation
-/github <repo> — repo info/commits
-/latex <formula> — render formula
-
-Attach: photo, code file, doc — I run it on the server.`;
-        await send(chatId, help);
-        return;
-      }
-      
-      case "/model": {
-        if (!args) {
-          if (thinkingId) await deleteMessage(chatId, thinkingId);
-          await send(chatId, "Current model: default. Use /model <name> in DM.");
-          return;
-        }
-        if (chatId !== msg.from?.id) {
-          if (thinkingId) await deleteMessage(chatId, thinkingId);
-          await send(chatId, "Use /model in DM for privacy.");
-          return;
-        }
-        // Model switching logic here
-        if (thinkingId) await editMessage(chatId, thinkingId, `Switched to ${args}.`);
-        return;
-      }
-      
-      case "/ask":
-      case "/plan":
-      case "/build": {
-        const mode = cmd.slice(1) as AgentMode;
-        const conv = await ensureConv(userId.user_id, bot.id);
-        let output = "";
-        
-        await runAgent({
-          userId: userId.user_id,
-          botId: bot.id,
-          conversationId: conv,
-          text: args || "help",
-          surface: "telegram",
-          mode,
-          emit: (e: AgentEvent) => {
-            if (e.type === "text" && e.text) output += e.text;
-          },
-        });
-        
-        if (thinkingId) await editMessage(chatId, thinkingId, output.slice(0, 4000) || "(done)");
-        return;
-      }
-      
-      default: {
-        if (thinkingId) await editMessage(chatId, thinkingId, "Unknown command. Use /help.");
-      }
+    if (cmd === "/help") {
+      if (thinkingId) await deleteMessage(chatId, thinkingId);
+      await send(chatId, "Janus — your cloud computer. Send a job, attach a photo or file. I answer, run code, or make files.");
+      return;
     }
+    if (cmd === "/model") {
+      if (!args) {
+        if (thinkingId) await deleteMessage(chatId, thinkingId);
+        await send(chatId, "Use /model <name> in DM.");
+        return;
+      }
+      if (chatId !== msg.from?.id) {
+        if (thinkingId) await deleteMessage(chatId, thinkingId);
+        await send(chatId, "Use /model in DM.");
+        return;
+      }
+      if (thinkingId) await editMessage(chatId, thinkingId, `Model set to ${args}.`);
+      return;
+    }
+    if (["/ask", "/plan", "/build"].includes(cmd)) {
+      const mode = cmd.slice(1) as AgentMode;
+      const conv = await ensureConv(userId.user_id, bot.id);
+      let output = "";
+      await runAgent({
+        userId: userId.user_id,
+        botId: bot.id,
+        conversationId: conv,
+        text: args || "help",
+        surface: "telegram",
+        mode,
+        emit: (e: AgentEvent) => {
+          if (e.type === "text" && e.text) output += e.text;
+        },
+      });
+      if (thinkingId) await editMessage(chatId, thinkingId, output.slice(0, 4000) || "(done)");
+      return;
+    }
+    // Contextual: no command means treat as ask
+    if (thinkingId) await deleteMessage(chatId, thinkingId);
+    const conv = await ensureConv(userId.user_id, bot.id);
+    let output = "";
+    await runAgent({
+      userId: userId.user_id,
+      botId: bot.id,
+      conversationId: conv,
+      text: cmd + " " + args,
+      surface: "telegram",
+      mode: "ask",
+      emit: (e: AgentEvent) => {
+        if (e.type === "text" && e.text) output += e.text;
+      },
+    });
+    if (thinkingId) await editMessage(chatId, thinkingId, output.slice(0, 4000) || "(done)");
   } catch (e) {
     if (thinkingId) await editMessage(chatId, thinkingId, `Error: ${String(e)}`);
   }
@@ -356,13 +341,6 @@ Attach: photo, code file, doc — I run it on the server.`;
 
 async function handleMessage(msg: TgMessage) {
   const text = (msg.text ?? "").trim();
-  
-  // Handle commands
-  const cmdMatch = text.match(/^(\/\w+)(?:\s+([\s\S]+))?$/);
-  if (cmdMatch) {
-    await handleCommand(msg, cmdMatch[1], cmdMatch[2] ?? "");
-    return;
-  }
   
   if (text.startsWith("/start")) {
     await handleStart(msg);
@@ -386,16 +364,26 @@ async function handleMessage(msg: TgMessage) {
   
   let job = (msg.text ?? msg.caption ?? "").replace(new RegExp(`@${name}\\b`, "ig"), "").trim();
   const photo = msg.photo?.length ? msg.photo[msg.photo.length - 1] : undefined;
+  const doc = (msg as any).document ? (msg as any).document : undefined;
   if (photo) {
     const rel = await savePhoto(userId, photo.file_id);
-    if (rel) job = `User sent photo /workspace/${rel}\n${job}`.trim();
+    if (rel) job = `Photo /workspace/${rel}: ${job || "analyze"}`;
+  }
+  if (doc) {
+    const file = await tg("getFile", { file_id: doc.file_id }) as { file_path?: string };
+    if (file.file_path) {
+      const r = await fetch(`https://api.telegram.org/file/bot${token()}/${file.file_path}`);
+      const buf = Buffer.from(await r.arrayBuffer());
+      const rel = `inbox/${Date.now()}-${doc.file_name || "doc"}`;
+      box.writeBytes(userId, rel, buf);
+      job = `File /workspace/${rel}: ${job || "process"}`;
+    }
   }
   
   if (!job) return;
   
-  // Delete user message and show thinking
   await deleteMessage(msg.chat.id, msg.message_id);
-  const thinking = await tg("sendMessage", { chat_id: msg.chat.id, text: "🤔 Думаю..." });
+  const thinking = await tg("sendMessage", { chat_id: msg.chat.id, text: "Думаю..." }) as { message_id?: number } | undefined;
   const thinkingId = thinking?.message_id;
   
   const conv = await ensureConv(userId, bot.id);
