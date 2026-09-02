@@ -306,18 +306,25 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
       const mode = cmd.slice(1) as AgentMode;
       const conv = await ensureConv(userId.user_id, bot.id);
       let output = "";
+      let phase: "think" | "search" | "found" | "extract" = "think";
       let sources = 0;
       let done = false;
-      let lastText = "Думаю...";
+      const statusText = () => {
+        if (phase === "think") return "Думаю...";
+        if (phase === "search") return "Ищу источники...";
+        if (phase === "found") return `Найдено ${sources} источников...`;
+        return "Извлекаю информацию...";
+      };
+      let lastText = "";
       const update = async () => {
         if (done || !thinkingId) return;
-        const body = sources ? `Найдено ${sources} источников...\nАнализирую...` : lastText;
+        const body = statusText();
         if (body !== lastText) {
           await editMessage(chatId, thinkingId, body);
           lastText = body;
         }
       };
-      const timer = setInterval(update, 1200);
+      const timer = setInterval(update, 900);
       try {
         await runAgent({
           userId: userId.user_id,
@@ -327,8 +334,14 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
           surface: "telegram",
           mode,
           emit: (e: AgentEvent) => {
+            if (e.type === "tool" && e.name === "search_web") {
+              if (e.status === "running") phase = "search";
+              if (e.status === "ok") { sources++; phase = "found"; }
+            }
+            if (e.type === "tool" && e.status === "ok" && ["read_page", "wiki", "workspace_read"].includes(e.name ?? "")) {
+              phase = "extract";
+            }
             if (e.type === "text" && e.text) output += e.text;
-            if (e.type === "tool" && e.name === "search_web" && e.status === "ok") sources++;
           },
         });
       } finally {
