@@ -216,7 +216,7 @@ async function handleStart(msg: TgMessage) {
   const text = msg.text ?? "";
   const code = text.split(/\s+/)[1];
   if (!code || !msg.from) {
-    await send(msg.chat.id, "Open Settings, Channels, then Link Telegram. I will not guess who you are.");
+    await send(msg.chat.id, "Janus. Link Telegram first: Settings > Channels > Link, or open the link I gave you.");
     return;
   }
   const row = await q1<{ user_id: string }>(
@@ -238,7 +238,7 @@ async function handleStart(msg: TgMessage) {
     [msg.chat.id, row.user_id],
   );
   await q(`delete from telegram_link_codes where code = $1`, [code]);
-  await send(msg.chat.id, "Linked. Ask me to install an MCP or a skill the same way you would in the app.");
+  await send(msg.chat.id, `Linked. You are ${msg.from.username || "you"}. Send a job or mention me in a group.`);
 }
 
 async function handleCallback(upd: NonNullable<TgUpdate["callback_query"]>) {
