@@ -8,6 +8,23 @@ import * as box from "./sandbox.js";
 
 const WRITE_ACTIONS = /send|email|delete|rm |purchase|pay|publish|drop |truncate|install/i;
 
+function applyPatch(before: string, patch: string): string {
+  if (!patch.includes("@@")) return patch;
+  const lines = patch.split("\n");
+  const out: string[] = [];
+  const src = before.split("\n");
+  let i = 0;
+  for (const l of lines) {
+    if (l.startsWith("@@")) continue;
+    if (l.startsWith("---") || l.startsWith("+++")) continue;
+    if (l.startsWith("+")) out.push(l.slice(1));
+    else if (l.startsWith("-")) i++;
+    else if (l.startsWith(" ")) { out.push(src[i] ?? l.slice(1)); i++; }
+    else if (l.trim() === "") out.push("");
+  }
+  return out.join("\n");
+}
+
 export type Surface = "web" | "telegram";
 export type AgentMode = "ask" | "plan" | "build";
 
@@ -125,12 +142,31 @@ function sharedTools(searchDesc: string): ToolSpec[] {
       parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
     },
     {
+      name: "workspace_read_many",
+      description: "Read multiple files from /workspace. Comma-separated paths.",
+      parameters: { type: "object", properties: { paths: { type: "string" } }, required: ["paths"] },
+    },
+    {
+      name: "workspace_list",
+      description: "List files under /workspace. Optional dir, empty for root.",
+      parameters: { type: "object", properties: { dir: { type: "string" } } },
+    },
+    {
       name: "workspace_write",
       description: "Write a file under /workspace.",
       parameters: {
         type: "object",
         properties: { path: { type: "string" }, content: { type: "string" } },
         required: ["path", "content"],
+      },
+    },
+    {
+      name: "workspace_write_patch",
+      description: "Apply a unified diff patch to a file under /workspace. Provide path and patch text.",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" }, patch: { type: "string" } },
+        required: ["path", "patch"],
       },
     },
     {
@@ -498,9 +534,27 @@ async function runTool(opts: {
     if (name === "workspace_read") {
       return { output: box.readFile(userId, String(args.path)) };
     }
+    if (name === "workspace_read_many") {
+      const raw = String(args.paths ?? "");
+      const paths = raw.split(",").map((s) => s.trim()).filter(Boolean);
+      const out = paths.map((p) => `--- ${p} ---\n${box.readFile(userId, p)}`).join("\n\n");
+      return { output: out || "(no files)" };
+    }
+    if (name === "workspace_list") {
+      const dir = String(args.dir ?? "").trim();
+      return { output: box.listFiles(userId, dir) };
+    }
     if (name === "workspace_write") {
       box.writeFile(userId, String(args.path), String(args.content ?? ""));
       return { output: "wrote" };
+    }
+    if (name === "workspace_write_patch") {
+      const p = String(args.path);
+      const patch = String(args.patch ?? "");
+      const before = box.readFile(userId, p);
+      const after = applyPatch(before, patch);
+      box.writeFile(userId, p, after);
+      return { output: `patched ${p}` };
     }
     if (name === "search_file") {
       return { output: box.searchFiles(userId, String(args.query ?? "")) };
