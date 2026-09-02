@@ -26,6 +26,8 @@ type TgUpdate = {
     data?: string;
     message?: { chat: TgChat };
   };
+  inline_query?: { id: string; from: TgUser; query: string; offset: string };
+  chosen_inline_result?: { result_id: string; from: TgUser; query: string };
 };
 
 const seen = new Set<number>();
@@ -66,8 +68,23 @@ export async function registerTelegramWebhook() {
   await tg("setWebhook", {
     url,
     secret_token: secret(),
-    allowed_updates: ["message", "callback_query"],
+    allowed_updates: ["message", "callback_query", "inline_query", "chosen_inline_result"],
   });
+  await tg("setMyCommands", {
+    commands: [
+      { command: "ask", description: "Ask — answer with tools" },
+      { command: "plan", description: "Plan — short numbered plan" },
+      { command: "build", description: "Build — execute with tools" },
+    ],
+  }).catch(() => {});
+  await tg("setMyCommands", {
+    commands: [
+      { command: "ask", description: "Ask in any chat via inline" },
+      { command: "plan", description: "Plan via inline" },
+      { command: "build", description: "Build via inline" },
+    ],
+    scope: { type: "all_private_chats" },
+  }).catch(() => {});
   await telegramBotName();
 }
 
@@ -275,6 +292,75 @@ async function handleMessage(msg: TgMessage) {
   });
 }
 
+async function handleInlineQuery(q: NonNullable<TgUpdate["inline_query"]>) {
+  const acc = await q1<{ user_id: string }>(`select user_id from telegram_accounts where telegram_user_id = $1`, [q.from.id]);
+  if (!acc) {
+    await tg("answerInlineQuery", {
+      inline_query_id: q.id,
+      results: [
+        {
+          type: "article",
+          id: "link",
+          title: "Link Telegram first",
+          description: "Open Settings → Channels → Link",
+          input_message_content: { message_text: "Link your Telegram in Janus Settings first." },
+        },
+      ],
+      cache_time: 10,
+    }).catch(() => {});
+    return;
+  }
+  const query = q.query.replace(/^\/(ask|plan|build)\s*/i, "").trim() || q.query.trim();
+  if (!query) {
+    await tg("answerInlineQuery", {
+      inline_query_id: q.id,
+      results: [
+        {
+          type: "article",
+          id: "hint",
+          title: "Ask Janus",
+          description: "Type your request after @JanusWorkBot",
+          input_message_content: { message_text: "Use: @JanusWorkBot your request" },
+        },
+      ],
+      cache_time: 10,
+    }).catch(() => {});
+    return;
+  }
+  const bot = await defaultBot(acc.user_id);
+  if (!bot) {
+    await tg("answerInlineQuery", { inline_query_id: q.id, results: [], cache_time: 10 }).catch(() => {});
+    return;
+  }
+  const mode = q.query.match(/^\/(plan|build)/i) ? parseMode(RegExp.$1.toLowerCase()) : parseMode(bot.mode);
+  const conv = await ensureConv(acc.user_id, bot.id);
+  let answer = "";
+  await runAgent({
+    userId: acc.user_id,
+    botId: bot.id,
+    conversationId: conv,
+    text: query,
+    surface: "telegram",
+    mode,
+    emit: (e) => {
+      if (e.type === "text" && e.text) answer += e.text;
+    },
+  });
+  await tg("answerInlineQuery", {
+    inline_query_id: q.id,
+    results: [
+      {
+        type: "article",
+        id: "janus",
+        title: "Janus",
+        description: answer.slice(0, 80) || "Ready",
+        input_message_content: { message_text: answer.slice(0, 4000) || "(empty)", parse_mode: "Markdown" },
+      },
+    ],
+    cache_time: 0,
+  }).catch(() => {});
+}
+
 export async function handleTelegramUpdate(body: unknown) {
   const upd = body as TgUpdate;
   if (!upd?.update_id) return;
@@ -288,5 +374,10 @@ export async function handleTelegramUpdate(body: unknown) {
     await handleCallback(upd.callback_query);
     return;
   }
+  if (upd.inline_query) {
+    await handleInlineQuery(upd.inline_query);
+    return;
+  }
+  if (upd.chosen_inline_result) return;
   if (upd.message) await handleMessage(upd.message);
 }
