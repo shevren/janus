@@ -64,7 +64,8 @@ export async function telegramBotName() {
 
 export async function registerTelegramWebhook() {
   if (!token()) return;
-  const url = `${config.publicUrl}/api/telegram/webhook`;
+  let url = `${config.publicUrl}/api/telegram/webhook`;
+  if (!url.startsWith("https://")) { url = url.replace(/^http:\/\//, "https://"); }
   await tg("setWebhook", {
     url,
     secret_token: secret(),
@@ -72,11 +73,11 @@ export async function registerTelegramWebhook() {
   });
   await tg("setMyCommands", {
     commands: [
-      { command: "ask", description: "Ask — answer with tools" },
-      { command: "plan", description: "Plan — short numbered plan" },
-      { command: "build", description: "Build — execute with tools" },
+      { command: "ask", description: "Ask вЂ” answer with tools" },
+      { command: "plan", description: "Plan вЂ” short numbered plan" },
+      { command: "build", description: "Build вЂ” execute with tools" },
     ],
-  }).catch(() => {});
+  }).catch((e) => { console.error("webhook", e); });
   await tg("setMyCommands", {
     commands: [
       { command: "ask", description: "Ask in any chat via inline" },
@@ -84,7 +85,7 @@ export async function registerTelegramWebhook() {
       { command: "build", description: "Build via inline" },
     ],
     scope: { type: "all_private_chats" },
-  }).catch(() => {});
+  }).catch((e) => { console.error("webhook", e); });
   await telegramBotName();
 }
 
@@ -147,7 +148,7 @@ async function editMessage(chatId: number, messageId: number, text: string, extr
 
 async function ephemeral(chatId: number, userId: number, text: string) {
   await tg("sendMessage", { chat_id: userId, text, disable_notification: true }).catch(() => {});
-  const t = await tg("sendMessage", { chat_id: chatId, text: "✓ Set (private)", disable_notification: true }) as { message_id?: number } | undefined;
+  const t = await tg("sendMessage", { chat_id: chatId, text: "вњ“ Set (private)", disable_notification: true }) as { message_id?: number } | undefined;
   if (t?.message_id) setTimeout(() => { void deleteMessage(chatId, t.message_id!); }, 1500);
 }
 
@@ -270,7 +271,7 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
   const userId = fromId ? await q1<{ user_id: string }>(`select user_id from telegram_accounts where telegram_user_id = $1`, [fromId]) : null;
   
   await deleteMessage(chatId, msg.message_id);
-  const thinking = await tg("sendMessage", { chat_id: chatId, text: "Думаю..." }) as { message_id?: number } | undefined;
+  const thinking = await tg("sendMessage", { chat_id: chatId, text: "Р”СѓРјР°СЋ..." }) as { message_id?: number } | undefined;
   const thinkingId = thinking?.message_id;
   
   try {
@@ -289,7 +290,7 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
 
     if (cmd === "/help") {
       if (thinkingId) await deleteMessage(chatId, thinkingId);
-      await send(chatId, "Janus — your cloud computer. Send a job, attach a photo or file. I answer, run code, or make files.");
+      await send(chatId, "Janus вЂ” your cloud computer. Send a job, attach a photo or file. I answer, run code, or make files.");
       return;
     }
     if (cmd === "/model") {
@@ -310,10 +311,10 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
       let sources = 0;
       let done = false;
       const statusText = () => {
-        if (phase === "think") return "Думаю...";
-        if (phase === "search") return "Ищу источники...";
-        if (phase === "found") return `Найдено ${sources} источников...`;
-        return "Извлекаю информацию...";
+        if (phase === "think") return "Р”СѓРјР°СЋ...";
+        if (phase === "search") return "РС‰Сѓ РёСЃС‚РѕС‡РЅРёРєРё...";
+        if (phase === "found") return `РќР°Р№РґРµРЅРѕ ${sources} РёСЃС‚РѕС‡РЅРёРєРѕРІ...`;
+        return "РР·РІР»РµРєР°СЋ РёРЅС„РѕСЂРјР°С†РёСЋ...";
       };
       let lastText = "";
       const update = async () => {
@@ -416,7 +417,7 @@ async function handleMessage(msg: TgMessage) {
   if (!job) return;
   
   await deleteMessage(msg.chat.id, msg.message_id);
-  const thinking = await tg("sendMessage", { chat_id: msg.chat.id, text: "Думаю..." }) as { message_id?: number } | undefined;
+  const thinking = await tg("sendMessage", { chat_id: msg.chat.id, text: "Р”СѓРјР°СЋ..." }) as { message_id?: number } | undefined;
   const thinkingId = thinking?.message_id;
   
   const conv = await ensureConv(userId, bot.id);
@@ -447,12 +448,12 @@ async function handleInlineQuery(q: NonNullable<TgUpdate["inline_query"]>) {
           type: "article",
           id: "link",
           title: "Link Telegram first",
-          description: "Open Settings → Channels → Link",
+          description: "Open Settings в†’ Channels в†’ Link",
           input_message_content: { message_text: "Link your Telegram in Janus Settings first." },
         },
       ],
       cache_time: 10,
-    }).catch(() => {});
+    }).catch((e) => { console.error("webhook", e); });
     return;
   }
   const query = q.query.replace(/^\/(ask|plan|build)\s*/i, "").trim() || q.query.trim();
@@ -469,7 +470,7 @@ async function handleInlineQuery(q: NonNullable<TgUpdate["inline_query"]>) {
         },
       ],
       cache_time: 10,
-    }).catch(() => {});
+    }).catch((e) => { console.error("webhook", e); });
     return;
   }
   const bot = await defaultBot(acc.user_id);
@@ -503,7 +504,7 @@ async function handleInlineQuery(q: NonNullable<TgUpdate["inline_query"]>) {
       },
     ],
     cache_time: 0,
-  }).catch(() => {});
+  }).catch((e) => { console.error("webhook", e); });
 }
 
 export async function handleTelegramUpdate(body: unknown) {
