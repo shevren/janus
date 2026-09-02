@@ -614,23 +614,45 @@ async function runTool(opts: {
     }
     if (name === "render_latex") {
       const latex = String(args.latex ?? "");
-      const out = await box.shell(userId, `echo '${latex.replace(/'/g, "'\\''")}' | pdflatex -jobname=formula -output-directory=/tmp && convert -density 300 /tmp/formula.pdf /workspace/formula.png`);
-      return { output: out.includes("formula.png") ? "LaTeX rendered: /workspace/formula.png" : "LaTeX render failed" };
+      if (!latex.trim()) return { output: "No latex provided" };
+      const safe = latex.replace(/'/g, "'\\''").replace(/"/g, '\\"');
+      const out = await box.shell(userId, `cd /workspace && cat > formula.tex <<'EOF'
+\\documentclass{article}
+\\usepackage{amsmath}
+\\begin{document}
+\\[
+${safe}
+\\]
+\\end{document}
+EOF
+pdflatex -interaction=nonstopmode -output-directory=/workspace formula.tex 2>&1 | tail -20`);
+      if (out.includes("formula.pdf")) {
+        await box.shell(userId, "cd /workspace && convert -density 300 -background white -alpha remove formula.pdf formula.png 2>&1");
+        return { output: "LaTeX rendered: /workspace/formula.png" };
+      }
+      return { output: "LaTeX render failed: " + out.slice(-200) };
     }
     if (name === "make_presentation") {
       const title = String(args.title ?? "Presentation");
       const content = String(args.content ?? "");
-      const md = `---\ntitle: ${title}\n---\n\n${content}`;
+      const md = `---\ntitle: ${title.replace(/"/g, '\\"')}\n---\n\n${content}`;
       box.writeFile(userId, "presentation.md", md);
-      const out = await box.shell(userId, "cd /workspace && pandoc -t pptx -o presentation.pptx presentation.md");
-      return { output: out.includes("presentation.pptx") ? "Presentation created: /workspace/presentation.pptx" : "Presentation failed" };
+      const out = await box.shell(userId, "cd /workspace && pandoc -t pptx -o presentation.pptx presentation.md 2>&1");
+      if (out.includes("presentation.pptx") || !out.includes("Error")) {
+        return { output: "Presentation created: /workspace/presentation.pptx" };
+      }
+      return { output: "Presentation failed: " + out.slice(-200) };
     }
     if (name === "edit_image") {
       const input = String(args.input ?? "");
       const ops = String(args.ops ?? "");
+      if (!input.includes("/workspace/")) {
+        return { output: "Input must be a workspace path like /workspace/inbox/photo.png" };
+      }
       const output = input.replace(/\.(png|jpg|jpeg|gif)$/i, "_edited.$1");
-      const out = await box.shell(userId, `convert ${input} ${ops} ${output}`);
-      return { output: `Image edited: ${output}` };
+      const safeOps = ops.replace(/"/g, '\\"');
+      const out = await box.shell(userId, `cd /workspace && convert "${input.replace("/workspace/", "")}" ${safeOps} "${output.replace("/workspace/", "")}" 2>&1`);
+      return { output: out.includes(output.split("/").pop() ?? "") ? `Image edited: ${output}` : `Edit failed: ${out.slice(-200)}` };
     }
     if (name === "analyze_image") {
       const provider = await activeProvider(userId);
