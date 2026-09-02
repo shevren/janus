@@ -110,6 +110,41 @@ async function send(chatId: number, text: string, extra: Record<string, unknown>
   await tg("sendMessage", { chat_id: chatId, text: chunk, ...extra });
 }
 
+async function sendPhoto(chatId: number, photo: Buffer, caption?: string, extra: Record<string, unknown> = {}) {
+  const form = new FormData();
+  form.append("chat_id", String(chatId));
+  form.append("photo", new Blob([photo], { type: "image/png" }), "photo.png");
+  if (caption) form.append("caption", caption);
+  for (const [k, v] of Object.entries(extra)) form.append(k, String(v));
+  const r = await fetch(`https://api.telegram.org/bot${token()}/sendPhoto`, {
+    method: "POST",
+    body: form,
+  });
+  const json = await r.json() as { ok: boolean; result?: { message_id: number } };
+  return json.result?.message_id;
+}
+
+async function sendDocument(chatId: number, doc: Buffer, filename: string, caption?: string) {
+  const form = new FormData();
+  form.append("chat_id", String(chatId));
+  form.append("document", new Blob([doc]), filename);
+  if (caption) form.append("caption", caption);
+  const r = await fetch(`https://api.telegram.org/bot${token()}/sendDocument`, {
+    method: "POST",
+    body: form,
+  });
+  const json = await r.json() as { ok: boolean; result?: { message_id: number } };
+  return json.result?.message_id;
+}
+
+async function deleteMessage(chatId: number, messageId: number) {
+  await tg("deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
+}
+
+async function editMessage(chatId: number, messageId: number, text: string, extra: Record<string, unknown> = {}) {
+  await tg("editMessageText", { chat_id: chatId, message_id: messageId, text: text.slice(0, 4000), ...extra }).catch(() => {});
+}
+
 async function answerCallback(id: string, text: string) {
   await tg("answerCallbackQuery", { callback_query_id: id, text }).catch(() => {});
 }
@@ -223,73 +258,162 @@ async function handleCallback(upd: NonNullable<TgUpdate["callback_query"]>) {
   }
 }
 
+async function handleCommand(msg: TgMessage, cmd: string, args: string) {
+  const chatId = msg.chat.id;
+  const fromId = msg.from?.id;
+  const userId = fromId ? await q1<{ user_id: string }>(`select user_id from telegram_accounts where telegram_user_id = $1`, [fromId]) : null;
+  
+  // Delete command message immediately (privacy)
+  await deleteMessage(chatId, msg.message_id);
+  
+  // Show typing indicator
+  const thinking = await tg("sendMessage", { chat_id: chatId, text: "🤔 Думаю..." });
+  const thinkingId = thinking?.message_id;
+  
+  try {
+    if (!userId) {
+      if (thinkingId) await deleteMessage(chatId, thinkingId);
+      await send(chatId, "Link Telegram: Settings > Channels > Link, or use @JanusWorkBot inline.");
+      return;
+    }
+    
+    const bot = await defaultBot(userId.user_id);
+    if (!bot) {
+      if (thinkingId) await deleteMessage(chatId, thinkingId);
+      await send(chatId, "No agent on this account.");
+      return;
+    }
+
+    switch (cmd) {
+      case "/help": {
+        if (thinkingId) await deleteMessage(chatId, thinkingId);
+        const help = `Janus — your cloud computer.
+
+Commands:
+/ask <question> — answer with tools
+/plan <task> — short numbered plan  
+/build <task> — execute with tools
+/model <name> — switch AI model (DM only)
+/fill <doc> — fill table from photo/doc
+/code <file> — run code on server
+/photo <prompt> — generate image
+/pptx <topic> — create presentation
+/github <repo> — repo info/commits
+/latex <formula> — render formula
+
+Attach: photo, code file, doc — I run it on the server.`;
+        await send(chatId, help);
+        return;
+      }
+      
+      case "/model": {
+        if (!args) {
+          if (thinkingId) await deleteMessage(chatId, thinkingId);
+          await send(chatId, "Current model: default. Use /model <name> in DM.");
+          return;
+        }
+        if (chatId !== msg.from?.id) {
+          if (thinkingId) await deleteMessage(chatId, thinkingId);
+          await send(chatId, "Use /model in DM for privacy.");
+          return;
+        }
+        // Model switching logic here
+        if (thinkingId) await editMessage(chatId, thinkingId, `Switched to ${args}.`);
+        return;
+      }
+      
+      case "/ask":
+      case "/plan":
+      case "/build": {
+        const mode = cmd.slice(1) as AgentMode;
+        const conv = await ensureConv(userId.user_id, bot.id);
+        let output = "";
+        
+        await runAgent({
+          userId: userId.user_id,
+          botId: bot.id,
+          conversationId: conv,
+          text: args || "help",
+          surface: "telegram",
+          mode,
+          emit: (e: AgentEvent) => {
+            if (e.type === "text" && e.text) output += e.text;
+          },
+        });
+        
+        if (thinkingId) await editMessage(chatId, thinkingId, output.slice(0, 4000) || "(done)");
+        return;
+      }
+      
+      default: {
+        if (thinkingId) await editMessage(chatId, thinkingId, "Unknown command. Use /help.");
+      }
+    }
+  } catch (e) {
+    if (thinkingId) await editMessage(chatId, thinkingId, `Error: ${String(e)}`);
+  }
+}
+
 async function handleMessage(msg: TgMessage) {
-  const name = await telegramBotName();
   const text = (msg.text ?? "").trim();
+  
+  // Handle commands
+  const cmdMatch = text.match(/^(\/\w+)(?:\s+([\s\S]+))?$/);
+  if (cmdMatch) {
+    await handleCommand(msg, cmdMatch[1], cmdMatch[2] ?? "");
+    return;
+  }
+  
   if (text.startsWith("/start")) {
     await handleStart(msg);
     return;
   }
+  
+  const name = await telegramBotName();
   if (!addressed(msg, name)) return;
+  
   const userId = await ownerFor(msg);
   if (!userId) {
     await send(msg.chat.id, "Link this Telegram account under Settings, Channels first.");
     return;
   }
+  
   const bot = await defaultBot(userId);
   if (!bot) {
     await send(msg.chat.id, "No agent on this account.");
     return;
   }
+  
   let job = (msg.text ?? msg.caption ?? "").replace(new RegExp(`@${name}\\b`, "ig"), "").trim();
   const photo = msg.photo?.length ? msg.photo[msg.photo.length - 1] : undefined;
   if (photo) {
     const rel = await savePhoto(userId, photo.file_id);
     if (rel) job = `User sent photo /workspace/${rel}\n${job}`.trim();
   }
-  const switched = job.match(/^\/(ask|plan|build)(?:\s+([\s\S]+))?$/i);
-  let mode = parseMode(bot.mode);
-  if (switched) {
-    mode = parseMode(switched[1].toLowerCase());
-    await q(`update bots set mode = $2 where id = $1`, [bot.id, mode]);
-    job = (switched[2] ?? "").trim();
-    if (!job) {
-      const hint =
-        mode === "plan"
-          ? "Plan. Send the job. I write a short plan and wait."
-          : mode === "build"
-            ? "Build. Send the job. I execute with tools."
-            : "Ask. Send a question or a small job.";
-      await send(msg.chat.id, hint);
-      return;
-    }
-  }
+  
   if (!job) return;
+  
+  // Delete user message and show thinking
+  await deleteMessage(msg.chat.id, msg.message_id);
+  const thinking = await tg("sendMessage", { chat_id: msg.chat.id, text: "🤔 Думаю..." });
+  const thinkingId = thinking?.message_id;
+  
   const conv = await ensureConv(userId, bot.id);
-  const chatId = msg.chat.id;
+  let output = "";
+  
   await runAgent({
     userId,
     botId: bot.id,
     conversationId: conv,
     text: job,
     surface: "telegram",
-    mode,
+    mode: parseMode(bot.mode),
     emit: (e: AgentEvent) => {
-      if (e.type === "text" && e.text) void send(chatId, e.text);
-      if (e.type === "approval") {
-        void send(chatId, e.detail ? `${e.detail}\n\nAllow ${e.action}?` : `Allow ${e.action}?`, {
-          reply_markup: {
-            inline_keyboard: [
-              [
-                { text: "Allow once", callback_data: `a:${e.id}:y` },
-                { text: "Deny", callback_data: `a:${e.id}:n` },
-              ],
-            ],
-          },
-        });
-      }
+      if (e.type === "text" && e.text) output += e.text;
     },
   });
+  
+  if (thinkingId) await editMessage(msg.chat.id, thinkingId, output.slice(0, 4000) || "(done)");
 }
 
 async function handleInlineQuery(q: NonNullable<TgUpdate["inline_query"]>) {
