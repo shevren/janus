@@ -249,6 +249,20 @@ function sharedTools(searchDesc: string): ToolSpec[] {
       description: "Store a short fact for this bot.",
       parameters: { type: "object", properties: { content: { type: "string" } }, required: ["content"] },
     },
+    {
+      name: "write_document",
+      description: "Create a formatted document (docx/pdf/odt/html) from markdown or plain content. Saves to /workspace. Use for reports, essays, specs.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          format: { type: "string" },
+          title: { type: "string" },
+          content: { type: "string" },
+        },
+        required: ["path", "format", "content"],
+      },
+    },
     ...githubTools(),
     ...catalogTools(),
   ];
@@ -361,6 +375,7 @@ export async function runAgent(opts: {
     `You are ${bot?.name ?? "a Janus bot"}, ${bot?.title ?? "an agent"}.`,
     bot?.description ?? "",
     modePrompt(surface, mode),
+    "You are a capable agent. You can create repos, write files, run code, generate images, render latex, make presentations, and edit images. Use tools. For documents, use write_document with format docx/pdf/odt/html.",
     "Never ask the user to paste an MCP URL or a skill file. If they want a server or skill, catalog_search, propose a match, then catalog_install. You are the installer. Settings is for enable, disable, and disconnect.",
     "Do not run remote install scripts or curl|bash. Prefer mcp.json, SKILL.md, or an npx MCP package.",
     "Never ask for a password in chat. If a site needs a human (login, 2FA, captcha, Cloudflare challenge), call computer_screenshot and stop for takeover.",
@@ -692,6 +707,25 @@ pdflatex -interaction=nonstopmode -output-directory=/workspace formula.tex 2>&1 
     if (name === "remember") {
       await q(`insert into memories (bot_id, content) values ($1, $2)`, [opts.botId, String(args.content ?? "")]);
       return { output: "remembered" };
+    }
+    if (name === "write_document") {
+      const path = String(args.path ?? "");
+      const format = String(args.format ?? "pdf").toLowerCase();
+      const title = String(args.title ?? "Document");
+      const content = String(args.content ?? "");
+      const md = `---\ntitle: ${title.replace(/"/g, '\\"')}\n---\n\n${content}`;
+      box.writeFile(userId, path.replace(/\.(docx|pdf|odt|html)$/i, "") + ".md", md);
+      let out = "";
+      if (format === "docx") {
+        out = await box.shell(userId, `cd /workspace && pandoc -t docx -o ${path.replace(/\.(docx|pdf|odt|html)$/i, "")}.docx ${path.replace(/\.(docx|pdf|odt|html)$/i, "")}.md 2>&1`);
+      } else if (format === "pdf") {
+        out = await box.shell(userId, `cd /workspace && pandoc -t pdf -o ${path.replace(/\.(docx|pdf|odt|html)$/i, "")}.pdf ${path.replace(/\.(docx|pdf|odt|html)$/i, "")}.md 2>&1`);
+      } else if (format === "odt") {
+        out = await box.shell(userId, `cd /workspace && pandoc -t odt -o ${path.replace(/\.(docx|pdf|odt|html)$/i, "")}.odt ${path.replace(/\.(docx|pdf|odt|html)$/i, "")}.md 2>&1`);
+      } else if (format === "html") {
+        out = await box.shell(userId, `cd /workspace && pandoc -t html -o ${path.replace(/\.(docx|pdf|odt|html)$/i, "")}.html ${path.replace(/\.(docx|pdf|odt|html)$/i, "")}.md 2>&1`);
+      }
+      return { output: out.includes(path.split("/").pop() ?? "") ? `Document written: /workspace/${path}` : "Document write failed" };
     }
     if (name === "catalog_search") {
       const kind = String(args.kind ?? "any");
