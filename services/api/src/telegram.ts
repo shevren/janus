@@ -217,7 +217,12 @@ async function handleStart(msg: TgMessage) {
   const text = msg.text ?? "";
   const code = text.split(/\s+/)[1];
   if (!code || !msg.from) {
-    await send(msg.chat.id, "Janus. Link Telegram first: Settings > Channels > Link, or open the link I gave you.");
+    const web = config.publicUrl || "http://localhost:8788";
+    await send(msg.chat.id, `Janus. To link, open ${web}/settings > Channels > Telegram > Link, or ask the web for a link.`, {
+      reply_markup: {
+        inline_keyboard: [[{ text: "Open Janus", url: `${web}/settings` }]],
+      },
+    });
     return;
   }
   const row = await q1<{ user_id: string }>(
