@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" role="img" aria-label="Janus - Self-hosted agents. One computer.">
+  <rect width="1280" height="720" fill="#0B0B0C"/>
+  <!-- Icon: two-face J, centered at x=360 y=360, scale 1.8 -->
+  <g transform="translate(260 180) scale(1.8)">
+    <path fill="#E6E6E8" d="M22 26 H96 V74 H78 C78 78 66 84 62 88 C58 92 52 98 52 102 C52 107 57 112 64 114 C62 118 58 122 58 126 C58 130 64 136 76 142 L96 160 V208 C96 230 84 245 74 250 L44 268 L22 246 Z"/>
+    <path fill="#E6E6E8" transform="translate(200 0) scale(-1 1)" d="M22 26 H96 V74 H78 C78 78 66 84 62 88 C58 92 52 98 52 102 C52 107 57 112 64 114 C62 118 58 122 58 126 C58 130 64 136 76 142 L96 160 V208 C96 230 84 245 74 250 L44 268 L22 246 Z"/>
+  </g>
+  <!-- Wordmark -->
+  <text x="640" y="300" font-family="IBM Plex Sans, sans-serif" font-size="64" font-weight="500" letter-spacing="20" fill="#E6E6E8">JANUS</text>
+  <line x1="640" y1="330" x2="1020" y2="330" stroke="#2C2C32" stroke-width="1"/>
+  <text x="640" y="365" font-family="IBM Plex Sans, sans-serif" font-size="18" fill="#8A8A92">Self-hosted agents. One computer.</text>
+</svg>
