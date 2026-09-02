@@ -51,7 +51,24 @@ function Login({ onIn }: { onIn: () => void }) {
   return (
     <div className="auth">
       <div className="auth-spacer">
-        <Mark size={40} title="Janus" />
+        <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+          <Mark size={56} title="Janus" />
+          <div>
+            <div style={{ fontSize: 28, fontWeight: 600, letterSpacing: "-0.02em" }}>Janus</div>
+            <div className="note" style={{ marginTop: 8, maxWidth: 320, lineHeight: 1.6 }}>
+              Your cloud computer on your phone. Agents share the browser, files, and shell.
+            </div>
+          </div>
+          <div style={{ marginTop: 32, padding: 16, background: "var(--panel)", border: "1px solid var(--rule)", borderRadius: 6, maxWidth: 320 }}>
+            <div className="mono" style={{ color: "var(--mute)", marginBottom: 8 }}>Live computer</div>
+            <div style={{ height: 120, background: "#000", borderRadius: 4, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--mute)", fontSize: 12 }}>
+              1280×800 browser
+            </div>
+          </div>
+        </div>
+        <div className="mono" style={{ marginTop: "auto", color: "var(--muted-2)", fontSize: 11 }}>
+          Self-hosted • Encrypted • One computer per account
+        </div>
       </div>
       <div className="auth-form">
         <Mark size={40} title="Janus" />
