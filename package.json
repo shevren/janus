@@ -2,7 +2,6 @@
     "name":  "janus",
     "private":  true,
     "workspaces":  [
-                       "apps/web",
                        "services/api"
                    ],
     "description":  "Self-hosted team of named agents with a shared computer",
@@ -16,12 +15,12 @@
                  "url":  "https://github.com/shevren/janus/issues"
              },
     "engines":  {
-                    "node":  ">=22"
+                    "node":  "\u003e=22"
                 },
     "author":  "shevren",
     "scripts":  {
-                    "dev":  "npm run dev -w @janus/api & npm run dev -w @janus/web",
-                    "build":  "npm run build -w @janus/web && npm run build -w @janus/api",
-                    "test":  "node --test tests/smoke.test.mjs"
+                    "test":  "node --test tests/smoke.test.mjs",
+                    "dev":  "npm run dev -w @janus/api",
+                    "build":  "npm run build -w @janus/api"
                 }
 }

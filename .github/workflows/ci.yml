@@ -15,5 +15,4 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci
-      - run: npm run build -w @janus/web
       - run: npm run build -w @janus/api
