@@ -1,0 +1,55 @@
+name: janus
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: janus
+      POSTGRES_PASSWORD: janus
+      POSTGRES_DB: janus
+    volumes:
+      - pg:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/01.sql:ro
+    mem_limit: 384m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U janus"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    mem_limit: 64m
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgres://janus:janus@postgres:5432/janus
+      REDIS_URL: redis://redis:6379
+      JANUS_LISTEN: 0.0.0.0
+      JANUS_PORT: "8788"
+      JANUS_WEB: /src/apps/web/dist
+      JANUS_DATA: /data
+    volumes:
+      - computers:/data
+    ports:
+      - "127.0.0.1:8788:8788"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    mem_limit: 1280m
+    shm_size: 256m
+
+volumes:
+  pg:
+  computers:

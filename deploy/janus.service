@@ -1,0 +1,15 @@
+[Unit]
+Description=Janus compose
+After=docker.service nginx.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/janus/deploy
+ExecStart=/usr/bin/docker compose -f /opt/janus/deploy/compose.yml up -d
+ExecStop=/usr/bin/docker compose -f /opt/janus/deploy/compose.yml down
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,27 @@
+{
+    "name":  "janus",
+    "private":  true,
+    "workspaces":  [
+                       "apps/web",
+                       "services/api"
+                   ],
+    "description":  "Self-hosted team of named agents with a shared computer",
+    "license":  "Apache-2.0",
+    "repository":  {
+                       "type":  "git",
+                       "url":  "https://github.com/shevren/janus.git"
+                   },
+    "homepage":  "https://github.com/shevren/janus#readme",
+    "bugs":  {
+                 "url":  "https://github.com/shevren/janus/issues"
+             },
+    "engines":  {
+                    "node":  ">=22"
+                },
+    "author":  "shevren",
+    "scripts":  {
+                    "dev":  "npm run dev -w @janus/api & npm run dev -w @janus/web",
+                    "build":  "npm run build -w @janus/web && npm run build -w @janus/api",
+                    "test":  "node --test tests/smoke.test.mjs"
+                }
+}
