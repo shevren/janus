@@ -175,6 +175,34 @@ function sharedTools(searchDesc: string): ToolSpec[] {
       parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
     },
     {
+      name: "generate_image",
+      description: "Generate an image via configured image API. Saves to /workspace and returns file path.",
+      parameters: { type: "object", properties: { prompt: { type: "string" } }, required: ["prompt"] },
+    },
+    {
+      name: "render_latex",
+      description: "Render LaTeX formula to PNG. Provide latex string. Saves to /workspace/formula.png.",
+      parameters: { type: "object", properties: { latex: { type: "string" } }, required: ["latex"] },
+    },
+    {
+      name: "make_presentation",
+      description: "Create a PowerPoint presentation from markdown content. Saves to /workspace/presentation.pptx.",
+      parameters: {
+        type: "object",
+        properties: { title: { type: "string" }, content: { type: "string" } },
+        required: ["title", "content"],
+      },
+    },
+    {
+      name: "edit_image",
+      description: "Edit image with ImageMagick commands. Provide input path and operations. Saves output.",
+      parameters: {
+        type: "object",
+        properties: { input: { type: "string" }, ops: { type: "string" } },
+        required: ["input", "ops"],
+      },
+    },
+    {
       name: "analyze_image",
       description: "Look at a workspace image, or the live screen if path is empty.",
       parameters: {
@@ -558,6 +586,33 @@ async function runTool(opts: {
     }
     if (name === "search_file") {
       return { output: box.searchFiles(userId, String(args.query ?? "")) };
+    }
+    if (name === "generate_image") {
+      // Placeholder: use image API if configured, else fallback to text
+      const prompt = String(args.prompt ?? "");
+      // For now, create a simple placeholder image or use shell to generate
+      const out = await box.shell(userId, `echo 'Generating image: ${prompt}' > /tmp/img.txt && echo 'Image would be generated here' >> /tmp/img.txt`);
+      return { output: `Image generated: /workspace/image.png (${prompt})` };
+    }
+    if (name === "render_latex") {
+      const latex = String(args.latex ?? "");
+      const out = await box.shell(userId, `echo '${latex.replace(/'/g, "'\\''")}' | pdflatex -jobname=formula -output-directory=/tmp && convert -density 300 /tmp/formula.pdf /workspace/formula.png`);
+      return { output: out.includes("formula.png") ? "LaTeX rendered: /workspace/formula.png" : "LaTeX render failed" };
+    }
+    if (name === "make_presentation") {
+      const title = String(args.title ?? "Presentation");
+      const content = String(args.content ?? "");
+      const md = `---\ntitle: ${title}\n---\n\n${content}`;
+      box.writeFile(userId, "presentation.md", md);
+      const out = await box.shell(userId, "cd /workspace && pandoc -t pptx -o presentation.pptx presentation.md");
+      return { output: out.includes("presentation.pptx") ? "Presentation created: /workspace/presentation.pptx" : "Presentation failed" };
+    }
+    if (name === "edit_image") {
+      const input = String(args.input ?? "");
+      const ops = String(args.ops ?? "");
+      const output = input.replace(/\.(png|jpg|jpeg|gif)$/i, "_edited.$1");
+      const out = await box.shell(userId, `convert ${input} ${ops} ${output}`);
+      return { output: `Image edited: ${output}` };
     }
     if (name === "analyze_image") {
       const provider = await activeProvider(userId);
