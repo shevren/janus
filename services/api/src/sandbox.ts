@@ -148,6 +148,10 @@ export async function pageA11y(userId: string): Promise<string> {
   return snap.slice(0, 40_000);
 }
 
+export function listFiles(userId: string, rel = "."): string {
+  return listWorkspace(userId, rel).join("\n") || "(empty)";
+}
+
 export function listWorkspace(userId: string, rel = "."): string[] {
   const root = workspace(userId);
   const dir = path.resolve(root, rel);
