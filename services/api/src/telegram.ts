@@ -145,6 +145,12 @@ async function editMessage(chatId: number, messageId: number, text: string, extr
   await tg("editMessageText", { chat_id: chatId, message_id: messageId, text: text.slice(0, 4000), ...extra }).catch(() => {});
 }
 
+async function ephemeral(chatId: number, userId: number, text: string) {
+  await tg("sendMessage", { chat_id: userId, text, disable_notification: true }).catch(() => {});
+  const t = await tg("sendMessage", { chat_id: chatId, text: "✓ Set (private)", disable_notification: true }) as { message_id?: number } | undefined;
+  if (t?.message_id) setTimeout(() => { void deleteMessage(chatId, t.message_id!); }, 1500);
+}
+
 async function answerCallback(id: string, text: string) {
   await tg("answerCallbackQuery", { callback_query_id: id, text }).catch(() => {});
 }
@@ -289,32 +295,46 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
     if (cmd === "/model") {
       if (!args) {
         if (thinkingId) await deleteMessage(chatId, thinkingId);
-        await send(chatId, "Use /model <name> in DM.");
+        await send(chatId, "Use /model <name>.");
         return;
       }
-      if (chatId !== msg.from?.id) {
-        if (thinkingId) await deleteMessage(chatId, thinkingId);
-        await send(chatId, "Use /model in DM.");
-        return;
-      }
-      if (thinkingId) await editMessage(chatId, thinkingId, `Model set to ${args}.`);
+      if (thinkingId) await deleteMessage(chatId, thinkingId);
+      await ephemeral(chatId, fromId!, `Model set to ${args}.`);
       return;
     }
     if (["/ask", "/plan", "/build"].includes(cmd)) {
       const mode = cmd.slice(1) as AgentMode;
       const conv = await ensureConv(userId.user_id, bot.id);
       let output = "";
-      await runAgent({
-        userId: userId.user_id,
-        botId: bot.id,
-        conversationId: conv,
-        text: args || "help",
-        surface: "telegram",
-        mode,
-        emit: (e: AgentEvent) => {
-          if (e.type === "text" && e.text) output += e.text;
-        },
-      });
+      let sources = 0;
+      let done = false;
+      let lastText = "Думаю...";
+      const update = async () => {
+        if (done || !thinkingId) return;
+        const body = sources ? `Найдено ${sources} источников...\nАнализирую...` : lastText;
+        if (body !== lastText) {
+          await editMessage(chatId, thinkingId, body);
+          lastText = body;
+        }
+      };
+      const timer = setInterval(update, 1200);
+      try {
+        await runAgent({
+          userId: userId.user_id,
+          botId: bot.id,
+          conversationId: conv,
+          text: args || "help",
+          surface: "telegram",
+          mode,
+          emit: (e: AgentEvent) => {
+            if (e.type === "text" && e.text) output += e.text;
+            if (e.type === "tool" && e.name === "search_web" && e.status === "ok") sources++;
+          },
+        });
+      } finally {
+        done = true;
+        clearInterval(timer);
+      }
       if (thinkingId) await editMessage(chatId, thinkingId, output.slice(0, 4000) || "(done)");
       return;
     }
