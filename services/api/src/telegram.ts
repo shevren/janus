@@ -415,6 +415,7 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
 }
 
 async function handleMessage(msg: TgMessage) {
+  console.log("handleMessage", msg.chat.type, msg.text?.slice(0,80), "from", msg.from?.id);
   const text = (msg.text ?? "").trim();
   
   if (text.startsWith("/start")) {
@@ -423,7 +424,10 @@ async function handleMessage(msg: TgMessage) {
   }
   
   const name = await telegramBotName();
-  if (!addressed(msg, name)) return;
+  if (!addressed(msg, name)) {
+    console.log("not addressed", text.slice(0,40));
+    return;
+  }
   
   const userId = await ownerFor(msg);
   if (!userId) {
