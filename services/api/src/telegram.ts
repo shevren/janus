@@ -18,9 +18,11 @@ type TgMessage = {
   caption_entities?: { type: string }[];
   reply_to_message?: { from?: TgUser; text?: string };
 };
+type TgGuestMessage = TgMessage & { guest_query_id?: string };
 type TgUpdate = {
   update_id: number;
   message?: TgMessage;
+  guest_message?: TgGuestMessage;
   callback_query?: {
     id: string;
     from: TgUser;
@@ -87,9 +89,10 @@ export async function registerTelegramWebhook() {
   const raw = config.publicUrl;
   const webhookOk =
     raw.startsWith("https://") && !raw.includes("sslip.io") && !raw.includes("localhost") && !raw.includes("127.0.0.1");
+  const updates = ["message", "guest_message", "callback_query", "inline_query", "chosen_inline_result"];
   if (!webhookOk) {
     await tg("deleteWebhook").catch(() => {});
-    startPolling();
+    startPolling(updates);
     await setCommands();
     await telegramBotName();
     return;
@@ -99,7 +102,7 @@ export async function registerTelegramWebhook() {
     await tg("setWebhook", {
       url,
       secret_token: secret(),
-      allowed_updates: ["message", "callback_query", "inline_query", "chosen_inline_result"],
+      allowed_updates: updates,
     });
   } catch (e) {
     console.error("webhook", e, "fallback to polling");
@@ -123,13 +126,13 @@ export async function registerTelegramWebhook() {
 }
 
 let polling = false;
-export function startPolling() {
+export function startPolling(allowed?: string[]) {
   if (polling || !token()) return;
   polling = true;
   let offset = 0;
   const loop = async () => {
     try {
-      const res = (await tg("getUpdates", { offset, timeout: 30, allowed_updates: ["message", "callback_query", "inline_query", "chosen_inline_result"] })) as { result?: TgUpdate[] };
+      const res = (await tg("getUpdates", { offset, timeout: 30, allowed_updates: allowed ?? ["message", "guest_message", "callback_query", "inline_query", "chosen_inline_result"] })) as { result?: TgUpdate[] };
       const arr = Array.isArray((res as unknown as { result?: TgUpdate[] })?.result) ? (res as unknown as { result: TgUpdate[] }).result : Array.isArray(res) ? (res as unknown as TgUpdate[]) : [];
       for (const u of arr) {
         offset = (u.update_id ?? 0) + 1;
@@ -352,7 +355,9 @@ async function savePhoto(userId: string, fileId: string) {
 
 async function handleStart(msg: TgMessage) {
   const text = msg.text ?? "";
-  const code = text.split(/\s+/)[1];
+  const rawCode = text.split(/\s+/)[1];
+  // Continuity from inline/guest ("Open Janus" button): no link code, just greet/link.
+  const code = rawCode === "inline" || rawCode === "guest" ? undefined : rawCode;
   if (!code || !msg.from) {
     const fromId = msg.from!.id;
     const acc = await q1<{ user_id: string }>(`select user_id from telegram_accounts where telegram_user_id = $1`, [fromId]);
@@ -444,7 +449,7 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
 
     if (cmd === "/help") {
       if (thinkingId) await deleteMessage(chatId, thinkingId);
-      await send(chatId, "Janus — your cloud computer. Добавь @JanusWorkBot в группу или пиши @JanusWorkBot <запрос> без добавления (inline). В личке просто пиши текст или /ask /plan /build. Прикрепи фото/файл — разберу.");
+      await send(chatId, "Janus — твой агент везде. В любом чате без добавления: просто упомяни @JanusWorkBot с вопросом — отвечу сам (guest), либо @JanusWorkBot <запрос> и выбери результат (inline). С ботом в группе: /ask /plan /build или упомяни меня. В личке: просто пиши, файлы и фото — в inbox.");
       return;
     }
     if (cmd === "/model") {
@@ -677,19 +682,78 @@ async function handleInlineQuery(q: NonNullable<TgUpdate["inline_query"]>) {
   }
   // Plain text: agent output can contain unbalanced markdown which makes
   // Telegram reject the whole answer with 400 (silent spinner for the user).
+  // is_personal: answers depend on the linked account. button: one-tap jump
+  // to PM to continue heavy tasks where the bot lives.
   await tg("answerInlineQuery", {
     inline_query_id: q.id,
-    results: [
-      {
-        type: "article",
-        id: "janus",
-        title: "Janus",
-        description: answer.slice(0, 80) || "Ready",
-        input_message_content: { message_text: answer.slice(0, 4000) || "(empty)" },
-      },
-    ],
+    results: [guestArticle(mode === "ask" ? "Janus" : `Janus (${mode})`, answer || "(empty)")],
     cache_time: 0,
+    is_personal: true,
+    button: { text: "Продолжить в Janus", start_parameter: "inline" },
   }).catch((e) => { console.error("webhook", e); });
+}
+
+function guestArticle(title: string, body: string) {
+  return {
+    type: "article",
+    id: `janus-${Math.random().toString(36).slice(2, 10)}`,
+    title,
+    description: body.slice(0, 80) || "Janus",
+    input_message_content: { message_text: body.slice(0, 4000) || "(empty)" },
+  };
+}
+
+async function answerGuest(queryId: string, title: string, body: string) {
+  await tg("answerGuestQuery", { guest_query_id: queryId, result: guestArticle(title, body) }).catch((e) => {
+    console.error("guest", e);
+  });
+}
+
+// Guest Mode (Bot API 10+): user mentions @JanusWorkBot in ANY chat without
+// adding it. We get one update with context and reply once, as the bot.
+async function handleGuest(msg: TgGuestMessage) {
+  const queryId = msg.guest_query_id;
+  if (!queryId) return;
+  const name = await telegramBotName();
+  const from = msg.from;
+  if (!from) {
+    await answerGuest(queryId, "Janus", "Janus here. Mention me with a question.");
+    return;
+  }
+  const acc = await q1<{ user_id: string }>(`select user_id from telegram_accounts where telegram_user_id = $1`, [from.id]);
+  if (!acc) {
+    await answerGuest(queryId, "Link Janus first", "Open @JanusWorkBot in a private chat and send /start, then mention me anywhere.");
+    return;
+  }
+  const bot = await defaultBot(acc.user_id);
+  if (!bot) {
+    await answerGuest(queryId, "Janus", "No agent on this account yet.");
+    return;
+  }
+  let text = (msg.text ?? msg.caption ?? "").replace(new RegExp(`@${name}\\b`, "ig"), "").trim();
+  const replyCtx = msg.reply_to_message?.text?.trim();
+  if (replyCtx) text = `Context:\n${replyCtx.slice(0, 1000)}\n\nTask:\n${text}`;
+  const m = text.match(/^\/(plan|build|ask)\s+([\s\S]*)$/i);
+  const mode = m ? parseMode(m[1].toLowerCase()) : parseMode(bot.mode);
+  const job = (m ? m[2] : text).trim() || "help";
+  const conv = await ensureConv(acc.user_id, bot.id);
+  let answer = "";
+  try {
+    await runAgent({
+      userId: acc.user_id,
+      botId: bot.id,
+      conversationId: conv,
+      text: job,
+      surface: "telegram",
+      mode,
+      emit: (e) => {
+        if (e.type === "text" && e.text) answer += e.text;
+      },
+    });
+  } catch (e) {
+    answer = `Error: ${String(e).slice(0, 300)}`;
+  }
+  await answerGuest(queryId, mode === "ask" ? "Janus" : `Janus (${mode})`, answer || "(done)");
 }
 
 export async function handleTelegramUpdate(body: unknown) {
@@ -700,6 +764,10 @@ export async function handleTelegramUpdate(body: unknown) {
   if (seen.size > 400) {
     const first = seen.values().next().value;
     if (first !== undefined) seen.delete(first);
+  }
+  if (upd.guest_message) {
+    await handleGuest(upd.guest_message);
+    return;
   }
   if (upd.callback_query) {
     await handleCallback(upd.callback_query);
