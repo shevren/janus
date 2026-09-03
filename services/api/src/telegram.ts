@@ -64,30 +64,7 @@ export async function telegramBotName() {
   return botUsername;
 }
 
-export async function registerTelegramWebhook() {
-  if (!token()) return;
-  let url = `${config.publicUrl}/api/telegram/webhook`;
-  if (!url.startsWith("https://")) { url = url.replace(/^http:\/\//, "https://"); }
-  try {
-    await tg("setWebhook", {
-      url,
-      secret_token: secret(),
-      allowed_updates: ["message", "callback_query", "inline_query", "chosen_inline_result"],
-    });
-  } catch (e) {
-    console.error("webhook", e, "fallback to polling");
-    startPolling();
-    return;
-  }
-  try {
-    const info = (await tg("getWebhookInfo")) as { last_error_message?: string };
-    if (info.last_error_message?.includes("SSL") || info.last_error_message?.includes("certificate")) {
-      console.error("SSL webhook, fallback to polling", info);
-      await tg("deleteWebhook").catch(() => {});
-      startPolling();
-      return;
-    }
-  } catch {}
+async function setCommands() {
   await tg("setMyCommands", {
     commands: [
       { command: "ask", description: "Ask — answer with tools" },
@@ -103,6 +80,45 @@ export async function registerTelegramWebhook() {
     ],
     scope: { type: "all_private_chats" },
   }).catch(() => {});
+}
+
+export async function registerTelegramWebhook() {
+  if (!token()) return;
+  const raw = config.publicUrl;
+  const webhookOk =
+    raw.startsWith("https://") && !raw.includes("sslip.io") && !raw.includes("localhost") && !raw.includes("127.0.0.1");
+  if (!webhookOk) {
+    await tg("deleteWebhook").catch(() => {});
+    startPolling();
+    await setCommands();
+    await telegramBotName();
+    return;
+  }
+  const url = `${raw}/api/telegram/webhook`;
+  try {
+    await tg("setWebhook", {
+      url,
+      secret_token: secret(),
+      allowed_updates: ["message", "callback_query", "inline_query", "chosen_inline_result"],
+    });
+  } catch (e) {
+    console.error("webhook", e, "fallback to polling");
+    await tg("deleteWebhook").catch(() => {});
+    startPolling();
+    await setCommands();
+    return;
+  }
+  try {
+    const info = (await tg("getWebhookInfo")) as { last_error_message?: string };
+    if (info.last_error_message?.includes("SSL") || info.last_error_message?.includes("certificate")) {
+      console.error("SSL webhook, fallback to polling", info);
+      await tg("deleteWebhook").catch(() => {});
+      startPolling();
+      await setCommands();
+      return;
+    }
+  } catch {}
+  await setCommands();
   await telegramBotName();
 }
 
