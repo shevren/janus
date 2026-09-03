@@ -120,7 +120,11 @@ export function startPolling() {
         await handleTelegramUpdate(u);
       }
     } catch (e) {
-      console.error("polling", e);
+      const msg = String(e);
+      console.error("polling", msg.slice(0, 200));
+      if (msg.includes("409") || msg.toLowerCase().includes("conflict")) {
+        await tg("deleteWebhook", { drop_pending_updates: false }).catch(() => {});
+      }
     }
     setTimeout(loop, 1000);
   };
@@ -310,10 +314,20 @@ async function handleCallback(upd: NonNullable<TgUpdate["callback_query"]>) {
   }
 }
 
+async function senderOrChatOwner(msg: TgMessage): Promise<string | undefined> {
+  if (msg.from) {
+    const acc = await q1<{ user_id: string }>(`select user_id from telegram_accounts where telegram_user_id = $1`, [msg.from.id]);
+    if (acc) return acc.user_id;
+  }
+  return ownerFor(msg);
+}
+
 async function handleCommand(msg: TgMessage, cmd: string, args: string) {
   const chatId = msg.chat.id;
   const fromId = msg.from?.id;
-  const userId = fromId ? await q1<{ user_id: string }>(`select user_id from telegram_accounts where telegram_user_id = $1`, [fromId]) : null;
+  const acc = fromId ? await q1<{ user_id: string }>(`select user_id from telegram_accounts where telegram_user_id = $1`, [fromId]) : null;
+  const chatOwner = await q1<{ owner_user_id: string }>(`select owner_user_id from telegram_chats where chat_id = $1`, [chatId]);
+  const userId = acc ?? (chatOwner ? { user_id: chatOwner.owner_user_id } : null);
   
   await deleteMessage(chatId, msg.message_id);
   const thinking = await tg("sendMessage", { chat_id: chatId, text: "Думаю..." }) as { message_id?: number } | undefined;
@@ -453,16 +467,24 @@ async function handleMessage(msg: TgMessage) {
   } else if (msg.from && pendingEmail.has(msg.from.id) && text) {
     if (text.toLowerCase() === "/cancel") { pendingEmail.delete(msg.from.id); await send(msg.chat.id, "Cancelled. Send /start again to link."); return; }
   }
-  
+
+  const cmdMatch = text.match(/^\/(ask|plan|build|help|model)(@\w+)?(\s+([\s\S]*))?$/i);
+  if (cmdMatch) {
+    const cmd = "/" + cmdMatch[1].toLowerCase();
+    const args = (cmdMatch[4] ?? "").trim();
+    await handleCommand(msg, cmd, args);
+    return;
+  }
+
   const name = await telegramBotName();
   if (!addressed(msg, name)) {
     console.log("not addressed", text.slice(0,40));
     return;
   }
   
-  const userId = await ownerFor(msg);
+  const userId = await senderOrChatOwner(msg);
   if (!userId) {
-    await send(msg.chat.id, "Link this Telegram account under Settings, Channels first.");
+    await send(msg.chat.id, "Link first: open @JanusWorkBot in DM and send /start, then use /ask here or @JanusWorkBot <query> inline without adding.");
     return;
   }
   

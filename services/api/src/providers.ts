@@ -33,13 +33,25 @@ export async function listProviders(userId: string) {
 }
 
 export async function activeProvider(userId: string): Promise<ProviderRow | undefined> {
-  return q1<ProviderRow>(
+  const row = await q1<ProviderRow>(
     `select * from model_providers where user_id = $1 and enabled = true order by created_at limit 1`,
     [userId],
   );
+  if (row) return row;
+  const apiKey = process.env.AGENT_MODEL_API_KEY ?? "";
+  if (!apiKey) return undefined;
+  return {
+    id: "env-default",
+    kind: "openai",
+    name: "janus-default",
+    base_url: process.env.AGENT_MODEL_BASE_URL || null,
+    api_key_enc: null,
+    default_model: process.env.AGENT_MODEL_DEFAULT || "kimi-k3",
+  } as unknown as ProviderRow;
 }
 
 function keyOf(row: ProviderRow) {
+  if ((row as { id?: string }).id === "env-default") return process.env.AGENT_MODEL_API_KEY ?? "";
   return row.api_key_enc ? decrypt(row.api_key_enc) : "";
 }
 
