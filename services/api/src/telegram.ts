@@ -66,18 +66,33 @@ export async function registerTelegramWebhook() {
   if (!token()) return;
   let url = `${config.publicUrl}/api/telegram/webhook`;
   if (!url.startsWith("https://")) { url = url.replace(/^http:\/\//, "https://"); }
-  await tg("setWebhook", {
-    url,
-    secret_token: secret(),
-    allowed_updates: ["message", "callback_query", "inline_query", "chosen_inline_result"],
-  });
+  try {
+    await tg("setWebhook", {
+      url,
+      secret_token: secret(),
+      allowed_updates: ["message", "callback_query", "inline_query", "chosen_inline_result"],
+    });
+  } catch (e) {
+    console.error("webhook", e, "fallback to polling");
+    startPolling();
+    return;
+  }
+  try {
+    const info = (await tg("getWebhookInfo")) as { last_error_message?: string };
+    if (info.last_error_message?.includes("SSL") || info.last_error_message?.includes("certificate")) {
+      console.error("SSL webhook, fallback to polling", info);
+      await tg("deleteWebhook").catch(() => {});
+      startPolling();
+      return;
+    }
+  } catch {}
   await tg("setMyCommands", {
     commands: [
-      { command: "ask", description: "Ask вЂ” answer with tools" },
-      { command: "plan", description: "Plan вЂ” short numbered plan" },
-      { command: "build", description: "Build вЂ” execute with tools" },
+      { command: "ask", description: "Ask — answer with tools" },
+      { command: "plan", description: "Plan — short numbered plan" },
+      { command: "build", description: "Build — execute with tools" },
     ],
-  }).catch((e) => { console.error("webhook", e); });
+  }).catch(() => {});
   await tg("setMyCommands", {
     commands: [
       { command: "ask", description: "Ask in any chat via inline" },
@@ -85,8 +100,29 @@ export async function registerTelegramWebhook() {
       { command: "build", description: "Build via inline" },
     ],
     scope: { type: "all_private_chats" },
-  }).catch((e) => { console.error("webhook", e); });
+  }).catch(() => {});
   await telegramBotName();
+}
+
+let polling = false;
+export function startPolling() {
+  if (polling || !token()) return;
+  polling = true;
+  let offset = 0;
+  const loop = async () => {
+    try {
+      const res = (await tg("getUpdates", { offset, timeout: 30, allowed_updates: ["message", "callback_query", "inline_query", "chosen_inline_result"] })) as { result?: TgUpdate[] };
+      const arr = Array.isArray((res as unknown as { result?: TgUpdate[] })?.result) ? (res as unknown as { result: TgUpdate[] }).result : Array.isArray(res) ? (res as unknown as TgUpdate[]) : [];
+      for (const u of arr) {
+        offset = (u.update_id ?? 0) + 1;
+        await handleTelegramUpdate(u);
+      }
+    } catch (e) {
+      console.error("polling", e);
+    }
+    setTimeout(loop, 1000);
+  };
+  loop();
 }
 
 export function telegramSecretOk(header: string | undefined) {
