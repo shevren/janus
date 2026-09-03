@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { parseMode, runAgent, type AgentEvent, type AgentMode } from "./agent.js";
 import { config } from "./config.js";
+import { encrypt } from "./crypto.js";
 import { q, q1 } from "./db.js";
 import * as box from "./sandbox.js";
 
@@ -185,7 +186,7 @@ async function editMessage(chatId: number, messageId: number, text: string, extr
 
 async function ephemeral(chatId: number, userId: number, text: string) {
   await tg("sendMessage", { chat_id: userId, text, disable_notification: true }).catch(() => {});
-  const t = await tg("sendMessage", { chat_id: chatId, text: "вњ“ Set (private)", disable_notification: true }) as { message_id?: number } | undefined;
+  const t = await tg("sendMessage", { chat_id: chatId, text: "✓ Set (private)", disable_notification: true }) as { message_id?: number } | undefined;
   if (t?.message_id) setTimeout(() => { void deleteMessage(chatId, t.message_id!); }, 1500);
 }
 
@@ -315,7 +316,7 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
   const userId = fromId ? await q1<{ user_id: string }>(`select user_id from telegram_accounts where telegram_user_id = $1`, [fromId]) : null;
   
   await deleteMessage(chatId, msg.message_id);
-  const thinking = await tg("sendMessage", { chat_id: chatId, text: "Р”СѓРјР°СЋ..." }) as { message_id?: number } | undefined;
+  const thinking = await tg("sendMessage", { chat_id: chatId, text: "Думаю..." }) as { message_id?: number } | undefined;
   const thinkingId = thinking?.message_id;
   
   try {
@@ -334,7 +335,7 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
 
     if (cmd === "/help") {
       if (thinkingId) await deleteMessage(chatId, thinkingId);
-      await send(chatId, "Janus вЂ” your cloud computer. Send a job, attach a photo or file. I answer, run code, or make files.");
+      await send(chatId, "Janus — your cloud computer. Добавь @JanusWorkBot в группу или пиши @JanusWorkBot <запрос> без добавления (inline). В личке просто пиши текст или /ask /plan /build. Прикрепи фото/файл — разберу.");
       return;
     }
     if (cmd === "/model") {
@@ -355,10 +356,10 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
       let sources = 0;
       let done = false;
       const statusText = () => {
-        if (phase === "think") return "Р”СѓРјР°СЋ...";
-        if (phase === "search") return "РС‰Сѓ РёСЃС‚РѕС‡РЅРёРєРё...";
-        if (phase === "found") return `РќР°Р№РґРµРЅРѕ ${sources} РёСЃС‚РѕС‡РЅРёРєРѕРІ...`;
-        return "РР·РІР»РµРєР°СЋ РёРЅС„РѕСЂРјР°С†РёСЋ...";
+        if (phase === "think") return "Думаю...";
+        if (phase === "search") return "Ищу источники...";
+        if (phase === "found") return `Найдено ${sources} источников...`;
+        return "Извлекаю информацию...";
       };
       let lastText = "";
       const update = async () => {
@@ -435,6 +436,14 @@ async function handleMessage(msg: TgMessage) {
       userId = created!.id;
       const botName = email.split("@")[0] + "-agent";
       await q(`insert into bots (user_id,name,mode) values ($1,$2,'ask') on conflict do nothing`, [userId, botName]);
+      if (config.agentModelApiKey) {
+        await q(`insert into model_providers (user_id,kind,name,base_url,api_key_enc,default_model) values ($1,'openai','janus-default',$2,$3,$4) on conflict do nothing`, [userId, config.agentModelBaseUrl || null, encrypt(config.agentModelApiKey), config.agentModelDefault]);
+      }
+    } else {
+      const has = await q1<{ id: string }>(`select id from model_providers where user_id=$1 limit 1`, [userId]);
+      if (!has && config.agentModelApiKey) {
+        await q(`insert into model_providers (user_id,kind,name,base_url,api_key_enc,default_model) values ($1,'openai','janus-default',$2,$3,$4)`, [userId, config.agentModelBaseUrl || null, encrypt(config.agentModelApiKey), config.agentModelDefault]);
+      }
     }
     await q(`insert into telegram_accounts (telegram_user_id,user_id,username) values ($1,$2,$3) on conflict (telegram_user_id) do update set user_id=excluded.user_id`, [msg.from.id, userId, msg.from.username ?? ""]);
     await q(`insert into telegram_chats (chat_id,owner_user_id,kind) values ($1,$2,'dm') on conflict (chat_id) do update set owner_user_id=excluded.owner_user_id`, [msg.chat.id, userId]);
@@ -484,7 +493,7 @@ async function handleMessage(msg: TgMessage) {
   if (!job) return;
   
   await deleteMessage(msg.chat.id, msg.message_id);
-  const thinking = await tg("sendMessage", { chat_id: msg.chat.id, text: "Р”СѓРјР°СЋ..." }) as { message_id?: number } | undefined;
+  const thinking = await tg("sendMessage", { chat_id: msg.chat.id, text: "Думаю..." }) as { message_id?: number } | undefined;
   const thinkingId = thinking?.message_id;
   
   const conv = await ensureConv(userId, bot.id);
@@ -515,7 +524,7 @@ async function handleInlineQuery(q: NonNullable<TgUpdate["inline_query"]>) {
           type: "article",
           id: "link",
           title: "Link Telegram first",
-          description: "Open Settings в†’ Channels в†’ Link",
+          description: "Open Settings → Channels → Link",
           input_message_content: { message_text: "Link your Telegram in Janus Settings first." },
         },
       ],
