@@ -207,6 +207,87 @@ async function editMessage(chatId: number, messageId: number, text: string, extr
   await tg("editMessageText", { chat_id: chatId, message_id: messageId, text: text.slice(0, 4000), ...extra }).catch(() => {});
 }
 
+function stripTags(s: string): string {
+  return s
+    .replace(/<[^>]+>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"');
+}
+
+// Telegram HTML subset only. Everything else becomes literal text, links
+// limited to http(s). Model output is untrusted for parse_mode purposes.
+function sanitizeTgHtml(src: string): string {
+  let s = src
+    .replace(/<\/?strong\b[^>]*>/gi, (t) => (t.startsWith("</") ? "</b>" : "<b>"))
+    .replace(/<\/?em\b[^>]*>/gi, (t) => (t.startsWith("</") ? "</i>" : "<i>"))
+    .replace(/<\/?(?:strike|del)\b[^>]*>/gi, (t) => (t.startsWith("</") ? "</s>" : "<s>"));
+  const keep: string[] = [];
+  const stash = (t: string) => {
+    keep.push(t);
+    return `\u0000${keep.length - 1}\u0000`;
+  };
+  s = s.replace(/<\/?(?:b|i|u|s|code|pre|blockquote|tg-spoiler)\b[^>]*>/gi, stash);
+  s = s.replace(/<a\b[^>]*href="(https?:\/\/[^"\s]+)"[^>]*>/gi, (_t, u: string) => stash(`<a href="${u}">`));
+  s = s.replace(/<\/a>/gi, () => stash("</a>"));
+  s = s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  s = s.replace(/\u0000(\d+)\u0000/g, (_s, n: string) => keep[Number(n)] ?? "");
+  return s;
+}
+
+function balancedHtml(s: string): boolean {
+  for (const t of ["b", "i", "u", "s", "code", "pre", "blockquote", "tg-spoiler", "a"]) {
+    const o = (s.match(new RegExp(`<${t}(\\s[^>]*)?>`, "g")) || []).length;
+    const c = (s.match(new RegExp(`</${t}>`, "g")) || []).length;
+    if (o !== c) return false;
+  }
+  return true;
+}
+
+function chunksOf(s: string, n = 3900): string[] {
+  if (s.length <= n) return [s];
+  const parts = s.split(/\n\s*\n/);
+  const out: string[] = [];
+  let cur = "";
+  for (const p of parts) {
+    const next = cur ? `${cur}\n\n${p}` : p;
+    if (next.length > n && cur) {
+      out.push(cur);
+      cur = p;
+    } else {
+      cur = next;
+    }
+  }
+  if (cur) out.push(cur);
+  return out.flatMap((c) => (c.length <= n ? [c] : (c.match(new RegExp(`[\\s\\S]{1,${n}}`, "g")) ?? [c])));
+}
+
+// Final answer delivery: sanitized HTML, chunked, plain-text fallback.
+// Never truncates long answers to the first 4000 chars anymore.
+async function deliver(chatId: number, thinkingId: number | undefined, html: string) {
+  const parts = chunksOf(html.trim() || "(done)");
+  let first = true;
+  for (const p of parts) {
+    const safe = sanitizeTgHtml(p);
+    const useHtml = balancedHtml(safe);
+    const text = (useHtml ? safe : stripTags(p)).slice(0, 4000);
+    const params = useHtml ? { parse_mode: "HTML" } : {};
+    try {
+      if (first && thinkingId) {
+        await tg("editMessageText", { chat_id: chatId, message_id: thinkingId, text, ...params });
+      } else {
+        await tg("sendMessage", { chat_id: chatId, text, ...params });
+      }
+    } catch {
+      const plain = stripTags(p).slice(0, 4000);
+      if (first && thinkingId) await editMessage(chatId, thinkingId, plain);
+      else await send(chatId, plain);
+    }
+    first = false;
+  }
+}
+
 async function ephemeral(chatId: number, userId: number, text: string) {
   await tg("sendMessage", { chat_id: userId, text, disable_notification: true }).catch(() => {});
   const t = await tg("sendMessage", { chat_id: chatId, text: "✓ Set (private)", disable_notification: true }) as { message_id?: number } | undefined;
@@ -218,11 +299,11 @@ async function answerCallback(id: string, text: string) {
 }
 
 const SEARCH_TOOLS = new Set(["search_web", "wiki", "github_search", "catalog_search", "search_file"]);
+const EXTRACT_TOOLS = new Set(["read_page", "wiki", "workspace_read", "workspace_read_many", "github_file", "read_pages"]);
 const READ_TOOLS = new Set([
-  "workspace_read", "workspace_read_many", "workspace_list", "read_page",
-  "github_file", "github_tree", "github_repos", "analyze_image", "now", "calc", "convert",
+  "workspace_read", "workspace_read_many", "workspace_list", "read_page", "read_pages",
+  "github_file", "github_tree", "github_repos", "analyze_image", "now", "calc", "convert", "think",
 ]);
-const EXTRACT_TOOLS = new Set(["read_page", "wiki", "workspace_read", "workspace_read_many", "github_file"]);
 
 // Shared progress chain: Думаю → Ищу → Нашёл → Извлекаю (+ Работаю/Подтверждение).
 // Both /ask commands and plain mentions use it, so the status never sticks.
@@ -485,7 +566,7 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
       } finally {
         stop();
       }
-      if (thinkingId) await editMessage(chatId, thinkingId, output.slice(0, 4000) || "(done)");
+      await deliver(chatId, thinkingId, output);
       return;
     }
     // Contextual: no command means treat as ask
@@ -503,9 +584,9 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
         if (e.type === "text" && e.text) output += e.text;
       },
     });
-    if (thinkingId) await editMessage(chatId, thinkingId, output.slice(0, 4000) || "(done)");
+    await deliver(chatId, thinkingId, output);
   } catch (e) {
-    if (thinkingId) await editMessage(chatId, thinkingId, `Error: ${String(e)}`);
+    await deliver(chatId, thinkingId, `Error: ${String(e)}`);
   }
 }
 
@@ -619,7 +700,7 @@ async function handleMessage(msg: TgMessage) {
     stop();
   }
 
-  if (thinkingId) await editMessage(msg.chat.id, thinkingId, output.slice(0, 4000) || "(done)");
+  await deliver(msg.chat.id, thinkingId, output);
 }
 
 async function handleInlineQuery(q: NonNullable<TgUpdate["inline_query"]>) {
@@ -694,12 +775,15 @@ async function handleInlineQuery(q: NonNullable<TgUpdate["inline_query"]>) {
 }
 
 function guestArticle(title: string, body: string) {
+  const safe = sanitizeTgHtml((body || "(empty)").slice(0, 4000));
+  const useHtml = balancedHtml(safe);
+  const text = (useHtml ? safe : stripTags(body || "(empty)")).slice(0, 4000);
   return {
     type: "article",
     id: `janus-${Math.random().toString(36).slice(2, 10)}`,
     title,
-    description: body.slice(0, 80) || "Janus",
-    input_message_content: { message_text: body.slice(0, 4000) || "(empty)" },
+    description: stripTags(body).slice(0, 80) || "Janus",
+    input_message_content: { message_text: text, ...(useHtml ? { parse_mode: "HTML" } : {}) },
   };
 }
 

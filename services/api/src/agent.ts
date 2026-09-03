@@ -1,5 +1,5 @@
 import { catalogInstall, catalogSearch, catalogTools } from "./catalog.js";
-import { calc, convert, nowIn, searchWebHttp, wiki } from "./daily.js";
+import { calc, convert, fetchPages, nowIn, searchWebHttp, wiki } from "./daily.js";
 import { q, q1 } from "./db.js";
 import { githubTools, runGithub } from "./github.js";
 import { callMcp, mcpTools } from "./mcp.js";
@@ -43,9 +43,11 @@ export function parseMode(v: unknown): AgentMode {
 
 const PLAN_READ = new Set([
   "plan",
+  "think",
   "workspace_read",
   "search_file",
   "search_web",
+  "read_pages",
   "analyze_image",
   "now",
   "calc",
@@ -134,8 +136,24 @@ function sharedTools(searchDesc: string): ToolSpec[] {
   return [
     {
       name: "search_web",
-      description: searchDesc,
+      description: `${searchDesc} Returns numbered results with full URLs. Always follow with read_pages on the best 2-4 URLs before answering from the web.`,
       parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+    },
+    {
+      name: "read_pages",
+      description:
+        "Read up to 4 web pages in parallel and return clean text with titles. Use full http(s) URLs from search_web results. Prefer this over guessing page contents.",
+      parameters: {
+        type: "object",
+        properties: { urls: { type: "array", items: { type: "string" } } },
+        required: ["urls"],
+      },
+    },
+    {
+      name: "think",
+      description:
+        "Record one short reasoning step before acting on a multi-step task (what you know, what is missing, next tool). No side effects. Use it before the first tool call on complex jobs.",
+      parameters: { type: "object", properties: { step: { type: "string" } }, required: ["step"] },
     },
     {
       name: "workspace_read",
@@ -322,7 +340,7 @@ function modePrompt(surface: Surface, mode: AgentMode): string {
   const lines = [
     "You are a general agent for this person: daily life (search, study, time, units, chat) and software work (workspace files, GitHub, shell, skills, MCP). You are not a chatbot wrapper. You do the work.",
     surface === "telegram"
-      ? "This turn is Telegram. You have no computer_* tools, no read_page, no compose_cut. search_web is HTTP only."
+      ? "This turn is Telegram. You have no computer_* tools, no read_page, no compose_cut. Web research is search_web (numbered results with URLs) then read_pages (full text)."
       : "You work on a shared computer: browser, /workspace files, and a shell. Prefer read_page after computer_open.",
   ];
   if (mode === "plan") {
@@ -339,6 +357,15 @@ function modePrompt(surface: Surface, mode: AgentMode): string {
     );
   }
   return lines.join("\n");
+}
+
+function telegramStyle(): string {
+  return [
+    "FORMAT (Telegram HTML only, never Markdown): <b>bold</b> for headers and key terms, <i>italic</i> for emphasis, <a href=\"https://...\">link text</a> for every link with its real URL, <code>inline code</code>, <pre>code blocks</pre>, <blockquote>quotes</blockquote>. Lists are plain lines starting with - or 1. No other tags. Escape & as &amp;.",
+    "STRUCTURE every answer: <b>headline</b>, one-line TL;DR, then short sections with bold headers. Web answers end with <b>Источники</b> as a numbered list of <a> links you actually read via read_pages. Keep it tight: chat answer, not an essay.",
+    "AUDIENCE: students, schoolkids, anyone. Explain like a tutor: simple words first, one concrete example, then the nuance. Russian by default unless the user writes in another language.",
+    "RESEARCH LOOP for web questions: think (one step) → search_web → read_pages on the best 2-4 URLs → answer with citations. Never invent URLs; only cite pages you read.",
+  ].join("\n");
 }
 
 export async function runAgent(opts: {
@@ -383,6 +410,7 @@ export async function runAgent(opts: {
     "Do not run remote install scripts or curl|bash. Prefer mcp.json, SKILL.md, or an npx MCP package.",
     "Never ask for a password in chat. If a site needs a human (login, 2FA, captcha, Cloudflare challenge), call computer_screenshot and stop for takeover.",
     "Do not send, delete, pay, publish, or install without an approval gate. Those tools will pause.",
+    surface === "telegram" ? telegramStyle() : "",
     skills,
     memories.length ? `Known facts:\n${memories.map((m) => `- ${m.content}`).join("\n")}` : "",
   ]
@@ -589,6 +617,14 @@ async function runTool(opts: {
         }
         return { output: `${page.title}\n${page.url}\n\n${page.text}` };
       });
+    }
+    if (name === "think") {
+      const step = String(args.step ?? "").trim().slice(0, 500);
+      return { output: step ? `noted: ${step}` : "noted" };
+    }
+    if (name === "read_pages") {
+      const raw = Array.isArray(args.urls) ? args.urls.map(String) : String(args.urls ?? "").split(/[\s,]+/);
+      return { output: await fetchPages(raw) };
     }
     if (name === "workspace_read") {
       return { output: box.readFile(userId, String(args.path)) };
