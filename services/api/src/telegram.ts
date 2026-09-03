@@ -214,6 +214,85 @@ async function answerCallback(id: string, text: string) {
   await tg("answerCallbackQuery", { callback_query_id: id, text }).catch(() => {});
 }
 
+const SEARCH_TOOLS = new Set(["search_web", "wiki", "github_search", "catalog_search", "search_file"]);
+const READ_TOOLS = new Set([
+  "workspace_read", "workspace_read_many", "workspace_list", "read_page",
+  "github_file", "github_tree", "github_repos", "analyze_image", "now", "calc", "convert",
+]);
+const EXTRACT_TOOLS = new Set(["read_page", "wiki", "workspace_read", "workspace_read_many", "github_file"]);
+
+// Shared progress chain: Думаю → Ищу → Нашёл → Извлекаю (+ Работаю/Подтверждение).
+// Both /ask commands and plain mentions use it, so the status never sticks.
+function makeStatus() {
+  let phase: "think" | "search" | "found" | "read" | "work" | "approval" | "extract" = "think";
+  let sources = 0;
+  let detail = "";
+  return {
+    onEvent(e: AgentEvent) {
+      if (e.type === "tool" && e.status === "running") {
+        if (SEARCH_TOOLS.has(e.name ?? "")) phase = "search";
+        else if (READ_TOOLS.has(e.name ?? "")) phase = "read";
+        else phase = "work";
+        detail = e.name ?? "";
+      }
+      if (e.type === "tool" && e.status === "ok") {
+        if (e.name === "search_web") {
+          sources++;
+          phase = "found";
+        } else if (EXTRACT_TOOLS.has(e.name ?? "")) {
+          phase = "extract";
+        }
+      }
+      if (e.type === "approval") phase = "approval";
+    },
+    text() {
+      switch (phase) {
+        case "think": return "Думаю...";
+        case "search": return "Ищу источники...";
+        case "found": return sources > 0 ? `Нашёл ${sources}, читаю...` : "Ищу источники...";
+        case "read": return "Читаю...";
+        case "extract": return "Извлекаю информацию...";
+        case "work": return detail ? `Делаю (${detail})...` : "Работаю...";
+        case "approval": return "Нужно подтверждение — кнопки выше";
+      }
+    },
+  };
+}
+
+function startStatusLoop(chatId: number, thinkingId: number | undefined, st: ReturnType<typeof makeStatus>) {
+  let done = false;
+  let last = "";
+  const timer = setInterval(() => {
+    void (async () => {
+      if (done || !thinkingId) return;
+      const body = st.text();
+      if (body !== last) {
+        last = body;
+        await editMessage(chatId, thinkingId, body);
+      }
+    })();
+  }, 900);
+  return () => {
+    done = true;
+    clearInterval(timer);
+  };
+}
+
+async function askApproval(chatId: number, id: string, action: string, detail?: string) {
+  await tg("sendMessage", {
+    chat_id: chatId,
+    text: `Подтвердить: ${action}${detail ? `\n${detail.slice(0, 300)}` : ""}`,
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: "Allow once", callback_data: `a:${id}:y` },
+          { text: "Deny", callback_data: `a:${id}:n` },
+        ],
+      ],
+    },
+  }).catch(() => {});
+}
+
 function addressed(msg: TgMessage, name: string) {
   if (msg.chat.type === "private") return true;
   const text = msg.text ?? msg.caption ?? "";
@@ -382,25 +461,8 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
       const mode = cmd.slice(1) as AgentMode;
       const conv = await ensureConv(userId.user_id, bot.id);
       let output = "";
-      let phase: "think" | "search" | "found" | "extract" = "think";
-      let sources = 0;
-      let done = false;
-      const statusText = () => {
-        if (phase === "think") return "Думаю...";
-        if (phase === "search") return "Ищу источники...";
-        if (phase === "found") return `Найдено ${sources} источников...`;
-        return "Извлекаю информацию...";
-      };
-      let lastText = "";
-      const update = async () => {
-        if (done || !thinkingId) return;
-        const body = statusText();
-        if (body !== lastText) {
-          await editMessage(chatId, thinkingId, body);
-          lastText = body;
-        }
-      };
-      const timer = setInterval(update, 900);
+      const st = makeStatus();
+      const stop = startStatusLoop(chatId, thinkingId, st);
       try {
         await runAgent({
           userId: userId.user_id,
@@ -410,19 +472,13 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
           surface: "telegram",
           mode,
           emit: (e: AgentEvent) => {
-            if (e.type === "tool" && e.name === "search_web") {
-              if (e.status === "running") phase = "search";
-              if (e.status === "ok") { sources++; phase = "found"; }
-            }
-            if (e.type === "tool" && e.status === "ok" && ["read_page", "wiki", "workspace_read"].includes(e.name ?? "")) {
-              phase = "extract";
-            }
+            st.onEvent(e);
+            if (e.type === "approval") void askApproval(chatId, e.id, e.action, e.detail);
             if (e.type === "text" && e.text) output += e.text;
           },
         });
       } finally {
-        done = true;
-        clearInterval(timer);
+        stop();
       }
       if (thinkingId) await editMessage(chatId, thinkingId, output.slice(0, 4000) || "(done)");
       return;
@@ -533,22 +589,31 @@ async function handleMessage(msg: TgMessage) {
   await deleteMessage(msg.chat.id, msg.message_id);
   const thinking = await tg("sendMessage", { chat_id: msg.chat.id, text: "Думаю..." }) as { message_id?: number } | undefined;
   const thinkingId = thinking?.message_id;
-  
+
   const conv = await ensureConv(userId, bot.id);
   let output = "";
-  
-  await runAgent({
-    userId,
-    botId: bot.id,
-    conversationId: conv,
-    text: job,
-    surface: "telegram",
-    mode: parseMode(bot.mode),
-    emit: (e: AgentEvent) => {
-      if (e.type === "text" && e.text) output += e.text;
-    },
-  });
-  
+  const st = makeStatus();
+  const stop = startStatusLoop(msg.chat.id, thinkingId, st);
+  try {
+    await runAgent({
+      userId,
+      botId: bot.id,
+      conversationId: conv,
+      text: job,
+      surface: "telegram",
+      mode: parseMode(bot.mode),
+      emit: (e: AgentEvent) => {
+        st.onEvent(e);
+        if (e.type === "approval") void askApproval(msg.chat.id, e.id, e.action, e.detail);
+        if (e.type === "text" && e.text) output += e.text;
+      },
+    });
+  } catch (e) {
+    output = `Error: ${String(e).slice(0, 500)}`;
+  } finally {
+    stop();
+  }
+
   if (thinkingId) await editMessage(msg.chat.id, thinkingId, output.slice(0, 4000) || "(done)");
 }
 
@@ -595,17 +660,23 @@ async function handleInlineQuery(q: NonNullable<TgUpdate["inline_query"]>) {
   const mode = q.query.match(/^\/(plan|build)/i) ? parseMode(RegExp.$1.toLowerCase()) : parseMode(bot.mode);
   const conv = await ensureConv(acc.user_id, bot.id);
   let answer = "";
-  await runAgent({
-    userId: acc.user_id,
-    botId: bot.id,
-    conversationId: conv,
-    text: query,
-    surface: "telegram",
-    mode,
-    emit: (e) => {
-      if (e.type === "text" && e.text) answer += e.text;
-    },
-  });
+  try {
+    await runAgent({
+      userId: acc.user_id,
+      botId: bot.id,
+      conversationId: conv,
+      text: query,
+      surface: "telegram",
+      mode,
+      emit: (e) => {
+        if (e.type === "text" && e.text) answer += e.text;
+      },
+    });
+  } catch (e) {
+    answer = `Error: ${String(e).slice(0, 300)}`;
+  }
+  // Plain text: agent output can contain unbalanced markdown which makes
+  // Telegram reject the whole answer with 400 (silent spinner for the user).
   await tg("answerInlineQuery", {
     inline_query_id: q.id,
     results: [
@@ -614,7 +685,7 @@ async function handleInlineQuery(q: NonNullable<TgUpdate["inline_query"]>) {
         id: "janus",
         title: "Janus",
         description: answer.slice(0, 80) || "Ready",
-        input_message_content: { message_text: answer.slice(0, 4000) || "(empty)", parse_mode: "Markdown" },
+        input_message_content: { message_text: answer.slice(0, 4000) || "(empty)" },
       },
     ],
     cache_time: 0,

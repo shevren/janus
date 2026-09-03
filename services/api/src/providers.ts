@@ -12,7 +12,18 @@ export type ProviderRow = {
   default_model: string;
 };
 
-export type ChatMsg = { role: "system" | "user" | "assistant" | "tool"; content: string; name?: string };
+export type ToolCall = { id: string; name: string; arguments: string };
+
+export type ChatMsg = {
+  role: "system" | "user" | "assistant" | "tool";
+  content: string | null;
+  /** assistant turn: tool calls requested by the model (must be sent back verbatim) */
+  toolCalls?: ToolCall[];
+  /** tool turn: must exactly match the corresponding assistant tool call id */
+  toolCallId?: string;
+  /** tool turn: human-readable tool name (debug only, never sent as id) */
+  name?: string;
+};
 
 export type ToolSpec = {
   name: string;
@@ -114,11 +125,26 @@ async function openaiCompat(row: ProviderRow, messages: ChatMsg[], tools: ToolSp
     apiKey: keyOf(row) || "x",
     baseURL: row.base_url || (row.kind === "google" ? "https://generativelanguage.googleapis.com/v1beta/openai/" : undefined),
   });
+  // Kimi K3 (and strict OpenAI-compat servers) require the exact loop:
+  // complete assistant message WITH tool_calls, then one tool message per
+  // call with the matching tool_call_id. Dropping tool_calls or inventing
+  // ids yields 400 InvalidParameter.
   const mapped = messages.map((m) => {
     if (m.role === "tool") {
-      return { role: "tool" as const, content: m.content, tool_call_id: m.name ?? "tool" };
+      return { role: "tool" as const, tool_call_id: m.toolCallId ?? "missing", content: m.content ?? "" };
     }
-    return { role: m.role as "system" | "user" | "assistant", content: m.content };
+    if (m.role === "assistant" && m.toolCalls?.length) {
+      return {
+        role: "assistant" as const,
+        content: m.content,
+        tool_calls: m.toolCalls.map((c) => ({
+          id: c.id,
+          type: "function" as const,
+          function: { name: c.name, arguments: c.arguments },
+        })),
+      };
+    }
+    return { role: m.role as "system" | "user" | "assistant", content: m.content ?? "" };
   });
   const r = await client.chat.completions.create({
     model: row.default_model || "gpt-4.1",
@@ -140,7 +166,7 @@ async function openaiCompat(row: ProviderRow, messages: ChatMsg[], tools: ToolSp
 
 async function anthropic(row: ProviderRow, messages: ChatMsg[], tools: ToolSpec[]): Promise<ModelOut> {
   const client = new Anthropic({ apiKey: keyOf(row) });
-  const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n");
+  const system = messages.filter((m) => m.role === "system").map((m) => m.content ?? "").join("\n");
   const rest = messages.filter((m) => m.role !== "system");
   const r = await client.messages.create({
     model: row.default_model || "claude-sonnet-4-20250514",
@@ -153,7 +179,7 @@ async function anthropic(row: ProviderRow, messages: ChatMsg[], tools: ToolSpec[
     })),
     messages: rest.map((m) => ({
       role: m.role === "assistant" ? "assistant" : "user",
-      content: m.content,
+      content: m.content ?? "",
     })),
   });
   let text = "";

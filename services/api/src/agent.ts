@@ -281,8 +281,11 @@ function builtins(surface: Surface): ToolSpec[] {
 
 function toolsFor(surface: Surface, mode: AgentMode, mcp: ToolSpec[]): ToolSpec[] {
   const all = [...builtins(surface), ...mcp];
-  if (mode !== "plan") return all;
-  return all.filter((t) => PLAN_READ.has(t.name));
+  // Kimi rejects duplicate function names with 400: first definition wins.
+  const seen = new Set<string>();
+  const uniq = all.filter((t) => (seen.has(t.name) ? false : (seen.add(t.name), true)));
+  if (mode !== "plan") return uniq;
+  return uniq.filter((t) => PLAN_READ.has(t.name));
 }
 
 function formatPlan(args: Record<string, unknown>): string {
@@ -386,9 +389,19 @@ export async function runAgent(opts: {
     .filter(Boolean)
     .join("\n\n");
 
+  // DB keeps text turns only (no tool protocol state), replay newest-first
+  // within a token budget so long chats don't blow the context window.
+  const turns = history.filter((m) => m.role === "user" || m.role === "assistant").slice(-40);
+  let budget = 60000;
+  const kept: typeof turns = [];
+  for (let i = turns.length - 1; i >= 0; i--) {
+    budget -= turns[i].content.length;
+    if (budget < 0 && kept.length) break;
+    kept.unshift(turns[i]);
+  }
   const messages: ChatMsg[] = [
     { role: "system", content: system },
-    ...history.map((m) => ({ role: m.role as ChatMsg["role"], content: m.content })),
+    ...kept.map((m) => ({ role: m.role as ChatMsg["role"], content: m.content })),
   ];
 
   await q(`insert into messages (conversation_id, role, content) values ($1, 'user', $2)`, [
@@ -409,7 +422,9 @@ export async function runAgent(opts: {
         opts.emit({ type: "text", text: out.text });
       }
       if (!out.toolCalls.length) break;
-      messages.push({ role: "assistant", content: out.text || "" });
+      // Keep the full assistant turn (incl. tool_calls): strict providers
+      // (Kimi K3) reject tool results without a preceding matching call.
+      messages.push({ role: "assistant", content: out.text || null, toolCalls: out.toolCalls });
       let stopAfterPlan = false;
       for (const call of out.toolCalls) {
         let args: Record<string, unknown> = {};
@@ -428,7 +443,7 @@ export async function runAgent(opts: {
           opts.emit({ type: "approval", id: ap!.id, action: call.name, detail });
           const ok = await waitApproval(ap!.id);
           if (!ok) {
-            messages.push({ role: "tool", name: call.id, content: "denied by user" });
+            messages.push({ role: "tool", toolCallId: call.id, name: call.name, content: "denied by user" });
             opts.emit({ type: "tool", name: call.name, status: "denied" });
             continue;
           }
@@ -447,7 +462,7 @@ export async function runAgent(opts: {
           opts.emit({ type: "takeover", url: result.takeover });
         }
         opts.emit({ type: "tool", name: call.name, status: "ok", output: result.output.slice(0, 4000) });
-        messages.push({ role: "tool", name: call.id, content: result.output });
+        messages.push({ role: "tool", toolCallId: call.id, name: call.name, content: result.output });
         if (call.name === "catalog_install") {
           mcp = await mcpTools(opts.userId);
           tools = toolsFor(surface, mode, mcp);
