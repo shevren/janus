@@ -7,7 +7,7 @@
   <a href="https://github.com/shevren/janus/network/members"><img src="https://img.shields.io/github/forks/shevren/janus?label=forks&labelColor=0B0B0C&color=2C2C32&style=flat" alt="forks"></a>
 </p>
 
-Agents with a shared computer. Send a job, take over when a human is needed.
+Your cloud computer on your phone. Agents with a shared computer. Send a job, take over when a human is needed.
 
 One computer per account. Browser, workspace, and shell are shared across agents. Approvals pause writes.
 

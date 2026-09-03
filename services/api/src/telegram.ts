@@ -32,6 +32,7 @@ type TgUpdate = {
 
 const seen = new Set<number>();
 let botUsername = "";
+const pendingEmail = new Map<number, number>(); // telegramUserId -> timestamp
 
 function token() {
   return config.telegramToken;
@@ -253,12 +254,14 @@ async function handleStart(msg: TgMessage) {
   const text = msg.text ?? "";
   const code = text.split(/\s+/)[1];
   if (!code || !msg.from) {
-    const web = config.publicUrl || "http://localhost:8788";
-    await send(msg.chat.id, `Janus. To link, open ${web}/settings > Channels > Telegram > Link, or ask the web for a link.`, {
-      reply_markup: {
-        inline_keyboard: [[{ text: "Open Janus", url: `${web}/settings` }]],
-      },
-    });
+    const fromId = msg.from!.id;
+    const acc = await q1<{ user_id: string }>(`select user_id from telegram_accounts where telegram_user_id = $1`, [fromId]);
+    if (acc) {
+      await send(msg.chat.id, "Already linked. Send a job or /help.");
+      return;
+    }
+    pendingEmail.set(fromId, Date.now());
+    await send(msg.chat.id, "Send your Janus email to link. Or generate a link via web if you have it.");
     return;
   }
   const row = await q1<{ user_id: string }>(
@@ -421,6 +424,25 @@ async function handleMessage(msg: TgMessage) {
   if (text.startsWith("/start")) {
     await handleStart(msg);
     return;
+  }
+
+  if (msg.from && pendingEmail.has(msg.from.id) && text.includes("@") && text.includes(".")) {
+    const email = text.trim().toLowerCase().split(/\s+/)[0];
+    const existing = await q1<{ id: string }>(`select id from users where lower(email)=$1`, [email]);
+    let userId = existing?.id;
+    if (!userId) {
+      const created = await q1<{ id: string }>(`insert into users (email,name) values ($1,$2) returning id`, [email, email.split("@")[0]]);
+      userId = created!.id;
+      const botName = email.split("@")[0] + "-agent";
+      await q(`insert into bots (user_id,name,mode) values ($1,$2,'ask') on conflict do nothing`, [userId, botName]);
+    }
+    await q(`insert into telegram_accounts (telegram_user_id,user_id,username) values ($1,$2,$3) on conflict (telegram_user_id) do update set user_id=excluded.user_id`, [msg.from.id, userId, msg.from.username ?? ""]);
+    await q(`insert into telegram_chats (chat_id,owner_user_id,kind) values ($1,$2,'dm') on conflict (chat_id) do update set owner_user_id=excluded.owner_user_id`, [msg.chat.id, userId]);
+    pendingEmail.delete(msg.from.id);
+    await send(msg.chat.id, `Linked as ${email}. Send a job — /ask, /plan or /build.`);
+    return;
+  } else if (msg.from && pendingEmail.has(msg.from.id) && text) {
+    if (text.toLowerCase() === "/cancel") { pendingEmail.delete(msg.from.id); await send(msg.chat.id, "Cancelled. Send /start again to link."); return; }
   }
   
   const name = await telegramBotName();
