@@ -422,12 +422,12 @@ async function defaultBot(userId: string) {
   );
 }
 
-async function ensureConv(userId: string, botId: string) {
+async function ensureConv(userId: string, botId: string, chatKey = "") {
   const row = await q1<{ id: string }>(
-    `insert into conversations (user_id, bot_id) values ($1,$2)
-     on conflict (user_id, bot_id) do update set bot_id = excluded.bot_id
+    `insert into conversations (user_id, bot_id, chat_key) values ($1,$2,$3)
+     on conflict (user_id, bot_id, chat_key) do update set bot_id = excluded.bot_id
      returning id`,
-    [userId, botId],
+    [userId, botId, chatKey],
   );
   return row!.id;
 }
@@ -812,7 +812,7 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
     }
     if (["/ask", "/plan", "/build"].includes(cmd)) {
       const mode = cmd.slice(1) as AgentMode;
-      const conv = await ensureConv(userId.user_id, bot.id);
+      const conv = await ensureConv(userId.user_id, bot.id, `tg:${chatId}`);
       await runUserJob({
         tgId: fromId ?? chatId,
         userId: userId.user_id,
@@ -828,7 +828,7 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
     }
     // Contextual: no command means treat as ask
     if (thinkingId) await deleteMessage(chatId, thinkingId);
-    const conv = await ensureConv(userId.user_id, bot.id);
+    const conv = await ensureConv(userId.user_id, bot.id, `tg:${chatId}`);
     let output = "";
     await runAgent({
       userId: userId.user_id,
@@ -946,7 +946,7 @@ async function handleMessage(msg: TgMessage) {
     : (await tg("sendMessage", { chat_id: msg.chat.id, text: "Думаю" }).catch(() => undefined) as { message_id?: number } | undefined);
   const thinkingId = thinking?.message_id;
 
-  const conv = await ensureConv(userId, bot.id);
+  const conv = await ensureConv(userId, bot.id, `tg:${msg.chat.id}`);
   await runUserJob({
     tgId: msg.from?.id ?? msg.chat.id,
     userId,
@@ -1028,7 +1028,7 @@ async function handleInlineQuery(q: NonNullable<TgUpdate["inline_query"]>) {
   inlineAbort.get(q.from.id)?.abort();
   const controller = new AbortController();
   inlineAbort.set(q.from.id, controller);
-  const conv = await ensureConv(acc.user_id, bot.id);
+  const conv = await ensureConv(acc.user_id, bot.id, `tg:inline:${q.from.id}`);
   let answer = "";
   let timedOut = false;
   const deadline = setTimeout(() => {
@@ -1134,7 +1134,7 @@ async function handleGuest(msg: TgGuestMessage) {
       job = `Photo /workspace/${rels[0]}: ${job || "analyze this photo"}`;
     }
   }
-  const conv = await ensureConv(acc.user_id, bot.id);
+  const conv = await ensureConv(acc.user_id, bot.id, `tg:guest:${msg.chat?.id ?? 0}`);
   let answer = "";
   try {
     await runAgent({
@@ -1196,7 +1196,7 @@ async function handleBusinessMessage(msg: TgBusinessMessage) {
   }
   const bot = await defaultBot(userId);
   if (!bot) return;
-  const conv = await ensureConv(userId, bot.id);
+  const conv = await ensureConv(userId, bot.id, `tg:biz:${msg.chat.id}`);
   let output = "";
   try {
     await runAgent({

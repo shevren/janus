@@ -29,6 +29,10 @@ CREATE TABLE IF NOT EXISTS telegram_link_codes (
 
 ALTER TABLE bots ADD COLUMN IF NOT EXISTS mode text NOT NULL DEFAULT 'ask';
 
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS chat_key text NOT NULL DEFAULT '';
+ALTER TABLE conversations DROP CONSTRAINT IF EXISTS conversations_user_id_bot_id_key;
+CREATE UNIQUE INDEX IF NOT EXISTS conversations_user_bot_chat_idx ON conversations (user_id, bot_id, chat_key);
+
 CREATE TABLE IF NOT EXISTS business_connections (
   connection_id text PRIMARY KEY,
   telegram_user_id bigint NOT NULL,

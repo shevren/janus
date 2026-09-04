@@ -607,12 +607,12 @@ async function upsertOauth(provider: string, subject: string, email: string, nam
   return user!.id;
 }
 
-async function ensureConv(userId: string, botId: string) {
+async function ensureConv(userId: string, botId: string, chatKey = "web") {
   const row = await q1<{ id: string }>(
-    `insert into conversations (user_id, bot_id) values ($1,$2)
-     on conflict (user_id, bot_id) do update set bot_id = excluded.bot_id
+    `insert into conversations (user_id, bot_id, chat_key) values ($1,$2,$3)
+     on conflict (user_id, bot_id, chat_key) do update set bot_id = excluded.bot_id
      returning id`,
-    [userId, botId],
+    [userId, botId, chatKey],
   );
   return row!.id;
 }

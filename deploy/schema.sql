@@ -42,8 +42,9 @@ CREATE TABLE conversations (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   bot_id uuid NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+  chat_key text NOT NULL DEFAULT '',
   created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (user_id, bot_id)
+  UNIQUE (user_id, bot_id, chat_key)
 );
 
 CREATE TABLE messages (
