@@ -19,7 +19,7 @@
                 },
     "author":  "shevren",
     "scripts":  {
-                    "test":  "node --test tests/smoke.test.mjs",
+                    "test":  "node --test tests/smoke.test.mjs && npx tsx --test tests/unit/tgformat.test.ts tests/unit/daily.test.ts",
                     "dev":  "npm run dev -w @janus/api",
                     "build":  "npm run build -w @janus/api"
                 }

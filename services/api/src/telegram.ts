@@ -4,25 +4,39 @@ import { config } from "./config.js";
 import { encrypt } from "./crypto.js";
 import { q, q1 } from "./db.js";
 import * as box from "./sandbox.js";
+import { balancedHtml, chunksOf, sanitizeTgHtml, stripTags } from "./tgformat.js";
 
 type TgUser = { id: number; username?: string; is_bot?: boolean };
 type TgChat = { id: number; type: string; title?: string };
+type TgPhoto = { file_id: string; file_size?: number };
+type TgDocument = { file_id: string; mime_type?: string; file_name?: string };
 type TgMessage = {
   message_id: number;
+  message_thread_id?: number;
   chat: TgChat;
   from?: TgUser;
   text?: string;
   caption?: string;
-  photo?: { file_id: string; file_size?: number }[];
+  photo?: TgPhoto[];
+  document?: TgDocument;
   entities?: { type: string; offset: number; length: number }[];
   caption_entities?: { type: string }[];
-  reply_to_message?: { from?: TgUser; text?: string };
+  reply_to_message?: { from?: TgUser; text?: string; caption?: string; photo?: TgPhoto[]; document?: TgDocument };
 };
 type TgGuestMessage = TgMessage & { guest_query_id?: string };
+type TgBusinessMessage = TgMessage & { business_connection_id?: string };
+type TgBusinessConnection = {
+  id: string;
+  user: TgUser;
+  can_reply?: boolean;
+  rights?: Record<string, unknown>;
+};
 type TgUpdate = {
   update_id: number;
   message?: TgMessage;
   guest_message?: TgGuestMessage;
+  business_connection?: TgBusinessConnection;
+  business_message?: TgBusinessMessage;
   callback_query?: {
     id: string;
     from: TgUser;
@@ -89,7 +103,7 @@ export async function registerTelegramWebhook() {
   const raw = config.publicUrl;
   const webhookOk =
     raw.startsWith("https://") && !raw.includes("sslip.io") && !raw.includes("localhost") && !raw.includes("127.0.0.1");
-  const updates = ["message", "guest_message", "callback_query", "inline_query", "chosen_inline_result"];
+  const updates = ["message", "guest_message", "business_connection", "business_message", "callback_query", "inline_query", "chosen_inline_result"];
   if (!webhookOk) {
     await tg("deleteWebhook").catch(() => {});
     startPolling(updates);
@@ -132,7 +146,7 @@ export function startPolling(allowed?: string[]) {
   let offset = 0;
   const loop = async () => {
     try {
-      const res = (await tg("getUpdates", { offset, timeout: 30, allowed_updates: allowed ?? ["message", "guest_message", "callback_query", "inline_query", "chosen_inline_result"] })) as { result?: TgUpdate[] };
+      const res = (await tg("getUpdates", { offset, timeout: 30, allowed_updates: allowed ?? ["message", "guest_message", "business_connection", "business_message", "callback_query", "inline_query", "chosen_inline_result"] })) as { result?: TgUpdate[] };
       const arr = Array.isArray((res as unknown as { result?: TgUpdate[] })?.result) ? (res as unknown as { result: TgUpdate[] }).result : Array.isArray(res) ? (res as unknown as TgUpdate[]) : [];
       for (const u of arr) {
         offset = (u.update_id ?? 0) + 1;
@@ -207,66 +221,12 @@ async function editMessage(chatId: number, messageId: number, text: string, extr
   await tg("editMessageText", { chat_id: chatId, message_id: messageId, text: text.slice(0, 4000), ...extra }).catch(() => {});
 }
 
-function stripTags(s: string): string {
-  return s
-    .replace(/<[^>]+>/g, "")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"');
-}
-
-// Telegram HTML subset only. Everything else becomes literal text, links
-// limited to http(s). Model output is untrusted for parse_mode purposes.
-function sanitizeTgHtml(src: string): string {
-  let s = src
-    .replace(/<\/?strong\b[^>]*>/gi, (t) => (t.startsWith("</") ? "</b>" : "<b>"))
-    .replace(/<\/?em\b[^>]*>/gi, (t) => (t.startsWith("</") ? "</i>" : "<i>"))
-    .replace(/<\/?(?:strike|del)\b[^>]*>/gi, (t) => (t.startsWith("</") ? "</s>" : "<s>"));
-  const keep: string[] = [];
-  const stash = (t: string) => {
-    keep.push(t);
-    return `\u0000${keep.length - 1}\u0000`;
-  };
-  s = s.replace(/<\/?(?:b|i|u|s|code|pre|blockquote|tg-spoiler)\b[^>]*>/gi, stash);
-  s = s.replace(/<a\b[^>]*href="(https?:\/\/[^"\s]+)"[^>]*>/gi, (_t, u: string) => stash(`<a href="${u}">`));
-  s = s.replace(/<\/a>/gi, () => stash("</a>"));
-  s = s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  s = s.replace(/\u0000(\d+)\u0000/g, (_s, n: string) => keep[Number(n)] ?? "");
-  return s;
-}
-
-function balancedHtml(s: string): boolean {
-  for (const t of ["b", "i", "u", "s", "code", "pre", "blockquote", "tg-spoiler", "a"]) {
-    const o = (s.match(new RegExp(`<${t}(\\s[^>]*)?>`, "g")) || []).length;
-    const c = (s.match(new RegExp(`</${t}>`, "g")) || []).length;
-    if (o !== c) return false;
-  }
-  return true;
-}
-
-function chunksOf(s: string, n = 3900): string[] {
-  if (s.length <= n) return [s];
-  const parts = s.split(/\n\s*\n/);
-  const out: string[] = [];
-  let cur = "";
-  for (const p of parts) {
-    const next = cur ? `${cur}\n\n${p}` : p;
-    if (next.length > n && cur) {
-      out.push(cur);
-      cur = p;
-    } else {
-      cur = next;
-    }
-  }
-  if (cur) out.push(cur);
-  return out.flatMap((c) => (c.length <= n ? [c] : (c.match(new RegExp(`[\\s\\S]{1,${n}}`, "g")) ?? [c])));
-}
-
 // Final answer delivery: sanitized HTML, chunked, plain-text fallback.
 // Never truncates long answers to the first 4000 chars anymore.
-async function deliver(chatId: number, thinkingId: number | undefined, html: string) {
+// threadId keeps answers inside the PM forum topic they came from.
+async function deliver(chatId: number, thinkingId: number | undefined, html: string, threadId?: number) {
   const parts = chunksOf(html.trim() || "(done)");
+  const thread = threadId ? { message_thread_id: threadId } : {};
   let first = true;
   for (const p of parts) {
     const safe = sanitizeTgHtml(p);
@@ -277,12 +237,12 @@ async function deliver(chatId: number, thinkingId: number | undefined, html: str
       if (first && thinkingId) {
         await tg("editMessageText", { chat_id: chatId, message_id: thinkingId, text, ...params });
       } else {
-        await tg("sendMessage", { chat_id: chatId, text, ...params });
+        await tg("sendMessage", { chat_id: chatId, text, ...params, ...thread });
       }
     } catch {
       const plain = stripTags(p).slice(0, 4000);
       if (first && thinkingId) await editMessage(chatId, thinkingId, plain);
-      else await send(chatId, plain);
+      else await send(chatId, plain, thread);
     }
     first = false;
   }
@@ -362,9 +322,10 @@ function startStatusLoop(chatId: number, thinkingId: number | undefined, st: Ret
   };
 }
 
-async function askApproval(chatId: number, id: string, action: string, detail?: string) {
+async function askApproval(chatId: number, id: string, action: string, detail?: string, threadId?: number) {
   await tg("sendMessage", {
     chat_id: chatId,
+    ...(threadId ? { message_thread_id: threadId } : {}),
     text: `Подтвердить: ${action}${detail ? `\n${detail.slice(0, 300)}` : ""}`,
     reply_markup: {
       inline_keyboard: [
@@ -434,6 +395,176 @@ async function savePhoto(userId: string, fileId: string) {
   return rel;
 }
 
+function isImageDoc(d?: TgDocument) {
+  return !!d && (/^image\//i.test(d.mime_type ?? "") || /\.(png|jpe?g|gif|webp)$/i.test(d.file_name ?? ""));
+}
+
+/** Biggest photo file_id: own photo → reply photo → reply image-document. */
+function photoFileId(msg: TgMessage): string | undefined {
+  if (msg.photo?.length) return msg.photo[msg.photo.length - 1].file_id;
+  const doc = (msg as { document?: TgDocument }).document;
+  if (isImageDoc(doc)) return doc!.file_id;
+  const rep = msg.reply_to_message;
+  if (rep?.photo?.length) return rep.photo[rep.photo.length - 1].file_id;
+  if (isImageDoc(rep?.document)) return rep!.document!.file_id;
+  return undefined;
+}
+
+async function saveAnyFile(userId: string, fileId: string, hint: string) {
+  const file = (await tg("getFile", { file_id: fileId })) as { file_path?: string };
+  if (!file.file_path) return "";
+  const r = await fetch(`https://api.telegram.org/file/bot${token()}/${file.file_path}`);
+  const buf = Buffer.from(await r.arrayBuffer());
+  const safe = (hint || "file").replace(/[^\w.-]+/g, "-").slice(0, 60) || "file";
+  const rel = `inbox/${Date.now()}-${safe}`;
+  box.writeBytes(userId, rel, buf);
+  return rel;
+}
+
+function isAbortError(e: unknown) {
+  return (e as { name?: string })?.name === "AbortError";
+}
+
+// Sweep stale link intents (10 min TTL) so the map can't grow forever.
+function pendingTouch(id: number) {
+  const now = Date.now();
+  for (const [k, at] of pendingEmail) {
+    if (now - at > 10 * 60 * 1000) pendingEmail.delete(k);
+  }
+  pendingEmail.set(id, now);
+}
+
+type UserRun = {
+  controller: AbortController;
+  query: string;
+  chatId: number;
+  thinkingId?: number;
+  tail: Promise<void>;
+};
+const userRuns = new Map<number, UserRun>();
+
+const inlineAbort = new Map<number, AbortController>();
+const inlineCache = new Map<string, { at: number; answer: string; mode: string }>();
+
+/** Cheap flash call: is the new message a continuation of the running job? */
+async function isContinuation(prev: string, next: string): Promise<boolean> {
+  const base = config.agentModelBaseUrl;
+  const key = config.agentModelApiKey;
+  if (!base || !key) return false;
+  try {
+    const r = await fetch(`${base.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        model: config.agentModelFlash || config.agentModelDefault,
+        messages: [
+          {
+            role: "system",
+            content: "Answer only YES or NO. YES if the second user message continues, refines or corrects the first task. NO if it is a different topic.",
+          },
+          { role: "user", content: `First: ${prev.slice(0, 500)}\nSecond: ${next.slice(0, 500)}` },
+        ],
+        max_tokens: 5,
+      }),
+      signal: AbortSignal.timeout(12000),
+    });
+    const j = (await r.json()) as { choices?: { message?: { content?: string } }[] };
+    return /\byes\b/i.test(j.choices?.[0]?.message?.content ?? "");
+  } catch {
+    return false;
+  }
+}
+
+async function startRun(args: {
+  tgId: number;
+  userId: string;
+  botId: string;
+  conv: string;
+  job: string;
+  mode: AgentMode;
+  chatId: number;
+  thinkingId?: number;
+  threadId?: number;
+}): Promise<void> {
+  const controller = new AbortController();
+  const st = makeStatus();
+  const stop = startStatusLoop(args.chatId, args.thinkingId, st);
+  let output = "";
+  const run = (async () => {
+    try {
+      await runAgent({
+        userId: args.userId,
+        botId: args.botId,
+        conversationId: args.conv,
+        text: args.job,
+        surface: "telegram",
+        mode: args.mode,
+        signal: controller.signal,
+        approvalTimeoutMs: 180000,
+        emit: (e: AgentEvent) => {
+          st.onEvent(e);
+          if (e.type === "approval") void askApproval(args.chatId, e.id, e.action, e.detail, args.threadId);
+          if (e.type === "text" && e.text) output += e.text;
+        },
+      });
+    } catch (e) {
+      if (!isAbortError(e)) output = `Ошибка: ${String(e).slice(0, 500)}`;
+    } finally {
+      stop();
+    }
+    if (!controller.signal.aborted) await deliver(args.chatId, args.thinkingId, output, args.threadId);
+  })();
+  userRuns.set(args.tgId, { controller, query: args.job, chatId: args.chatId, thinkingId: args.thinkingId, tail: run });
+  try {
+    await run;
+  } finally {
+    if (userRuns.get(args.tgId)?.controller === controller) userRuns.delete(args.tgId);
+  }
+}
+
+/**
+ * Smart per-user execution: continuation of the running job aborts it and
+ * answers the merged request in the SAME thinking message; a new topic is
+ * queued and answered after the current one.
+ */
+async function runUserJob(args: {
+  tgId: number;
+  userId: string;
+  botId: string;
+  conv: string;
+  job: string;
+  mode: AgentMode;
+  chatId: number;
+  thinkingId?: number;
+  threadId?: number;
+}): Promise<void> {
+  const prev = userRuns.get(args.tgId);
+  if (prev && !prev.controller.signal.aborted) {
+    let cont = false;
+    try {
+      cont = await isContinuation(prev.query, args.job);
+    } catch {
+      cont = false;
+    }
+    if (cont) {
+      prev.controller.abort();
+      try {
+        await prev.tail;
+      } catch {}
+      if (args.thinkingId && args.thinkingId !== prev.thinkingId) {
+        await deleteMessage(args.chatId, args.thinkingId);
+      }
+      if (prev.thinkingId) await editMessage(prev.chatId, prev.thinkingId, "Дополняю...");
+      return startRun({ ...args, job: `${prev.query}\n\nUpdate: ${args.job}`, chatId: prev.chatId, thinkingId: prev.thinkingId });
+    }
+    if (args.thinkingId) await deleteMessage(args.chatId, args.thinkingId);
+    await send(args.chatId, "Принял, отвечу после текущего ⏳");
+    prev.tail = prev.tail.then(() => startRun({ ...args })).catch(() => {});
+    return;
+  }
+  return startRun(args);
+}
+
 async function handleStart(msg: TgMessage) {
   const text = msg.text ?? "";
   const rawCode = text.split(/\s+/)[1];
@@ -446,7 +577,7 @@ async function handleStart(msg: TgMessage) {
       await send(msg.chat.id, "Already linked. Send a job or /help.");
       return;
     }
-    pendingEmail.set(fromId, Date.now());
+    pendingTouch(fromId);
     await send(msg.chat.id, "Send your Janus email to link. Or generate a link via web if you have it.");
     return;
   }
@@ -511,7 +642,8 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
   const userId = acc ?? (chatOwner ? { user_id: chatOwner.owner_user_id } : null);
   
   await deleteMessage(chatId, msg.message_id);
-  const thinking = await tg("sendMessage", { chat_id: chatId, text: "Думаю..." }) as { message_id?: number } | undefined;
+  const thread = msg.message_thread_id ? { message_thread_id: msg.message_thread_id } : {};
+  const thinking = await tg("sendMessage", { chat_id: chatId, text: "Думаю...", ...thread }) as { message_id?: number } | undefined;
   const thinkingId = thinking?.message_id;
   
   try {
@@ -530,7 +662,7 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
 
     if (cmd === "/help") {
       if (thinkingId) await deleteMessage(chatId, thinkingId);
-      await send(chatId, "Janus — твой агент везде. В любом чате без добавления: просто упомяни @JanusWorkBot с вопросом — отвечу сам (guest), либо @JanusWorkBot <запрос> и выбери результат (inline). С ботом в группе: /ask /plan /build или упомяни меня. В личке: просто пиши, файлы и фото — в inbox.");
+      await send(chatId, "Janus — твой агент везде. В любом чате без добавления: просто упомяни @JanusWorkBot с вопросом — отвечу сам (guest), либо @JanusWorkBot <запрос> и выбери результат (inline). На фото можно отвечать reply + упоминание. С ботом в группе: /ask /plan /build или упомяни меня. В личке: просто пиши, файлы и фото — в inbox. Секретарь для своих чатов: /secretary on.");
       return;
     }
     if (cmd === "/model") {
@@ -543,30 +675,52 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
       await ephemeral(chatId, fromId!, `Model set to ${args}.`);
       return;
     }
+    if (cmd === "/secretary") {
+      if (thinkingId) await deleteMessage(chatId, thinkingId);
+      const sub = args.toLowerCase().split(/\s+/)[0];
+      if (!fromId) {
+        await send(chatId, "Link Telegram first: open @JanusWorkBot in DM and send /start.");
+        return;
+      }
+      if (sub === "on" || sub === "off") {
+        await q(`update business_connections set auto_reply = $2, updated_at = now() where telegram_user_id = $1`, [
+          fromId,
+          sub === "on",
+        ]);
+        await send(
+          chatId,
+          sub === "on"
+            ? "Секретарь включён: буду отвечать в твоих чатах, где подключён. Чтобы подключить: включи Secretary Mode в BotFather и привяжи аккаунт к боту."
+            : "Секретарь выключен: входящие бизнес-сообщения игнорирую.",
+        );
+      } else {
+        const rows = await q<{ connection_id: string; auto_reply: boolean }>(
+          `select connection_id, auto_reply from business_connections where telegram_user_id = $1`,
+          [fromId],
+        );
+        await send(
+          chatId,
+          rows.length
+            ? `Подключения: ${rows.map((r) => `${r.connection_id.slice(0, 8)}… (${r.auto_reply ? "on" : "off"})`).join(", ")}. /secretary on|off`
+            : "Нет подключений. Включи Secretary Mode в BotFather, подключи аккаунт к боту, затем /secretary on.",
+        );
+      }
+      return;
+    }
     if (["/ask", "/plan", "/build"].includes(cmd)) {
       const mode = cmd.slice(1) as AgentMode;
       const conv = await ensureConv(userId.user_id, bot.id);
-      let output = "";
-      const st = makeStatus();
-      const stop = startStatusLoop(chatId, thinkingId, st);
-      try {
-        await runAgent({
-          userId: userId.user_id,
-          botId: bot.id,
-          conversationId: conv,
-          text: args || "help",
-          surface: "telegram",
-          mode,
-          emit: (e: AgentEvent) => {
-            st.onEvent(e);
-            if (e.type === "approval") void askApproval(chatId, e.id, e.action, e.detail);
-            if (e.type === "text" && e.text) output += e.text;
-          },
-        });
-      } finally {
-        stop();
-      }
-      await deliver(chatId, thinkingId, output);
+      await runUserJob({
+        tgId: fromId ?? chatId,
+        userId: userId.user_id,
+        botId: bot.id,
+        conv,
+        job: args || "help",
+        mode,
+        chatId,
+        thinkingId,
+        threadId: msg.message_thread_id,
+      });
       return;
     }
     // Contextual: no command means treat as ask
@@ -586,14 +740,20 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
     });
     await deliver(chatId, thinkingId, output);
   } catch (e) {
-    await deliver(chatId, thinkingId, `Error: ${String(e)}`);
+    await deliver(chatId, thinkingId, `Ошибка: ${String(e)}`);
   }
 }
 
 async function handleMessage(msg: TgMessage) {
   console.log("handleMessage", msg.chat.type, msg.text?.slice(0,80), "from", msg.from?.id);
   const text = (msg.text ?? "").trim();
-  
+  if (msg.from) {
+    const now = Date.now();
+    for (const [k, at] of pendingEmail) {
+      if (now - at > 10 * 60 * 1000) pendingEmail.delete(k);
+    }
+  }
+
   if (text.startsWith("/start")) {
     await handleStart(msg);
     return;
@@ -626,7 +786,7 @@ async function handleMessage(msg: TgMessage) {
     if (text.toLowerCase() === "/cancel") { pendingEmail.delete(msg.from.id); await send(msg.chat.id, "Cancelled. Send /start again to link."); return; }
   }
 
-  const cmdMatch = text.match(/^\/(ask|plan|build|help|model)(@\w+)?(\s+([\s\S]*))?$/i);
+  const cmdMatch = text.match(/^\/(ask|plan|build|help|model|secretary)(@\w+)?(\s+([\s\S]*))?$/i);
   if (cmdMatch) {
     const cmd = "/" + cmdMatch[1].toLowerCase();
     const args = (cmdMatch[4] ?? "").trim();
@@ -653,54 +813,39 @@ async function handleMessage(msg: TgMessage) {
   }
   
   let job = (msg.text ?? msg.caption ?? "").replace(new RegExp(`@${name}\\b`, "ig"), "").trim();
-  const photo = msg.photo?.length ? msg.photo[msg.photo.length - 1] : undefined;
-  const doc = (msg as any).document ? (msg as any).document : undefined;
-  if (photo) {
-    const rel = await savePhoto(userId, photo.file_id);
-    if (rel) job = `Photo /workspace/${rel}: ${job || "analyze"}`;
-  }
-  if (doc) {
-    const file = await tg("getFile", { file_id: doc.file_id }) as { file_path?: string };
-    if (file.file_path) {
-      const r = await fetch(`https://api.telegram.org/file/bot${token()}/${file.file_path}`);
-      const buf = Buffer.from(await r.arrayBuffer());
-      const rel = `inbox/${Date.now()}-${doc.file_name || "doc"}`;
-      box.writeBytes(userId, rel, buf);
-      job = `File /workspace/${rel}: ${job || "process"}`;
+  const replyText = msg.reply_to_message?.text ?? msg.reply_to_message?.caption ?? "";
+  if (!job && replyText) job = replyText.replace(new RegExp(`@${name}\\b`, "ig"), "").trim();
+  const img = photoFileId(msg);
+  if (img) {
+    const rel = await savePhoto(userId, img);
+    if (rel) job = `Photo /workspace/${rel}: ${job || "analyze this photo"}`;
+  } else {
+    const doc = (msg as { document?: TgDocument }).document ?? msg.reply_to_message?.document;
+    if (doc) {
+      const rel = await saveAnyFile(userId, doc.file_id, doc.file_name ?? "doc");
+      if (rel) job = `File /workspace/${rel}: ${job || "process"}`;
     }
   }
   
   if (!job) return;
   
   await deleteMessage(msg.chat.id, msg.message_id);
-  const thinking = await tg("sendMessage", { chat_id: msg.chat.id, text: "Думаю..." }) as { message_id?: number } | undefined;
+  const mthread = msg.message_thread_id ? { message_thread_id: msg.message_thread_id } : {};
+  const thinking = await tg("sendMessage", { chat_id: msg.chat.id, text: "Думаю...", ...mthread }) as { message_id?: number } | undefined;
   const thinkingId = thinking?.message_id;
 
   const conv = await ensureConv(userId, bot.id);
-  let output = "";
-  const st = makeStatus();
-  const stop = startStatusLoop(msg.chat.id, thinkingId, st);
-  try {
-    await runAgent({
-      userId,
-      botId: bot.id,
-      conversationId: conv,
-      text: job,
-      surface: "telegram",
-      mode: parseMode(bot.mode),
-      emit: (e: AgentEvent) => {
-        st.onEvent(e);
-        if (e.type === "approval") void askApproval(msg.chat.id, e.id, e.action, e.detail);
-        if (e.type === "text" && e.text) output += e.text;
-      },
-    });
-  } catch (e) {
-    output = `Error: ${String(e).slice(0, 500)}`;
-  } finally {
-    stop();
-  }
-
-  await deliver(msg.chat.id, thinkingId, output);
+  await runUserJob({
+    tgId: msg.from?.id ?? msg.chat.id,
+    userId,
+    botId: bot.id,
+    conv,
+    job,
+    mode: parseMode(bot.mode),
+    chatId: msg.chat.id,
+    thinkingId,
+    threadId: msg.message_thread_id,
+  });
 }
 
 async function handleInlineQuery(q: NonNullable<TgUpdate["inline_query"]>) {
@@ -744,6 +889,33 @@ async function handleInlineQuery(q: NonNullable<TgUpdate["inline_query"]>) {
     return;
   }
   const mode = q.query.match(/^\/(plan|build)/i) ? parseMode(RegExp.$1.toLowerCase()) : parseMode(bot.mode);
+  // Short queries (mid-typing keystrokes): instant empty + button, no agent run.
+  if (query.length < 3) {
+    await tg("answerInlineQuery", {
+      inline_query_id: q.id,
+      results: [],
+      cache_time: 0,
+      is_personal: true,
+      button: { text: "Допиши вопрос — отвечу здесь", start_parameter: "inline" },
+    }).catch(() => {});
+    return;
+  }
+  const cacheKey = `${q.from.id}\n${mode}\n${query}`;
+  const hit = inlineCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < 90000) {
+    await tg("answerInlineQuery", {
+      inline_query_id: q.id,
+      results: [guestArticle(mode === "ask" ? "Janus" : `Janus (${mode})`, hit.answer)],
+      cache_time: 0,
+      is_personal: true,
+      button: { text: "Продолжить в Janus", start_parameter: "inline" },
+    }).catch(() => {});
+    return;
+  }
+  // New keystroke cancels the stale run for this user.
+  inlineAbort.get(q.from.id)?.abort();
+  const controller = new AbortController();
+  inlineAbort.set(q.from.id, controller);
   const conv = await ensureConv(acc.user_id, bot.id);
   let answer = "";
   try {
@@ -754,12 +926,22 @@ async function handleInlineQuery(q: NonNullable<TgUpdate["inline_query"]>) {
       text: query,
       surface: "telegram",
       mode,
+      signal: controller.signal,
+      approvalTimeoutMs: 180000,
       emit: (e) => {
         if (e.type === "text" && e.text) answer += e.text;
       },
     });
   } catch (e) {
-    answer = `Error: ${String(e).slice(0, 300)}`;
+    if (!isAbortError(e)) answer = `Ошибка: ${String(e).slice(0, 300)}`;
+  } finally {
+    if (inlineAbort.get(q.from.id) === controller) inlineAbort.delete(q.from.id);
+  }
+  if (controller.signal.aborted || !answer) return;
+  inlineCache.set(cacheKey, { at: Date.now(), answer, mode });
+  if (inlineCache.size > 200) {
+    const first = inlineCache.keys().next().value;
+    if (first !== undefined) inlineCache.delete(first);
   }
   // Plain text: agent output can contain unbalanced markdown which makes
   // Telegram reject the whole answer with 400 (silent spinner for the user).
@@ -814,12 +996,19 @@ async function handleGuest(msg: TgGuestMessage) {
     await answerGuest(queryId, "Janus", "No agent on this account yet.");
     return;
   }
+  // Best effort: remove the summon message where we have delete rights.
+  if (msg.chat && msg.message_id) await deleteMessage(msg.chat.id, msg.message_id);
   let text = (msg.text ?? msg.caption ?? "").replace(new RegExp(`@${name}\\b`, "ig"), "").trim();
-  const replyCtx = msg.reply_to_message?.text?.trim();
+  const replyCtx = (msg.reply_to_message?.text ?? msg.reply_to_message?.caption ?? "").trim();
   if (replyCtx) text = `Context:\n${replyCtx.slice(0, 1000)}\n\nTask:\n${text}`;
   const m = text.match(/^\/(plan|build|ask)\s+([\s\S]*)$/i);
   const mode = m ? parseMode(m[1].toLowerCase()) : parseMode(bot.mode);
-  const job = (m ? m[2] : text).trim() || "help";
+  let job = (m ? m[2] : text).trim() || "help";
+  const img = photoFileId(msg);
+  if (img) {
+    const rel = await savePhoto(acc.user_id, img).catch(() => "");
+    if (rel) job = `Photo /workspace/${rel}: ${job || "analyze this photo"}`;
+  }
   const conv = await ensureConv(acc.user_id, bot.id);
   let answer = "";
   try {
@@ -835,9 +1024,82 @@ async function handleGuest(msg: TgGuestMessage) {
       },
     });
   } catch (e) {
-    answer = `Error: ${String(e).slice(0, 300)}`;
+    answer = `Ошибка: ${String(e).slice(0, 300)}`;
   }
   await answerGuest(queryId, mode === "ask" ? "Janus" : `Janus (${mode})`, answer || "(done)");
+}
+
+const bizRate = new Map<string, number>();
+
+async function handleBusinessConnection(conn: TgBusinessConnection) {
+  const acc = await q1<{ user_id: string }>(`select user_id from telegram_accounts where telegram_user_id = $1`, [conn.user.id]);
+  await q(
+    `insert into business_connections (connection_id, telegram_user_id, user_id, rights, updated_at)
+     values ($1,$2,$3,$4,now())
+     on conflict (connection_id) do update set telegram_user_id = excluded.telegram_user_id, user_id = excluded.user_id, rights = excluded.rights, updated_at = now()`,
+    [conn.id, conn.user.id, acc?.user_id ?? null, JSON.stringify(conn.rights ?? { can_reply: conn.can_reply ?? false })],
+  );
+  // Best effort: tell the owner where to flip the switch. Works if they started the bot.
+  await tg("sendMessage", {
+    chat_id: conn.user.id,
+    text: "Секретарь подключён. Включи автоответы: /secretary on. Выключить: /secretary off.",
+  }).catch(() => {});
+}
+
+// Secretary Mode: the owner's account forwards incoming DMs here.
+// Replies go out on behalf of the owner. Default OFF, loop-guarded.
+async function handleBusinessMessage(msg: TgBusinessMessage) {
+  const connId = msg.business_connection_id;
+  if (!connId) return;
+  const row = await q1<{ telegram_user_id: number; user_id: string | null; rights: { can_reply?: boolean }; auto_reply: boolean }>(
+    `select telegram_user_id, user_id, rights, auto_reply from business_connections where connection_id = $1`,
+    [connId],
+  );
+  if (!row?.auto_reply) return;
+  if (!row.rights?.can_reply) return;
+  if (msg.from?.is_bot || (msg.from && msg.from.id === row.telegram_user_id)) return;
+  const text = (msg.text ?? msg.caption ?? "").trim();
+  if (!text) return;
+  const last = bizRate.get(connId) ?? 0;
+  if (Date.now() - last < 20000) return;
+  bizRate.set(connId, Date.now());
+  let userId = row.user_id;
+  if (!userId) {
+    const acc = await q1<{ user_id: string }>(`select user_id from telegram_accounts where telegram_user_id = $1`, [row.telegram_user_id]);
+    if (!acc) return;
+    userId = acc.user_id;
+  }
+  const bot = await defaultBot(userId);
+  if (!bot) return;
+  const conv = await ensureConv(userId, bot.id);
+  let output = "";
+  try {
+    await runAgent({
+      userId,
+      botId: bot.id,
+      conversationId: conv,
+      text,
+      surface: "telegram",
+      mode: "ask",
+      approvalTimeoutMs: 60000,
+      emit: (e) => {
+        if (e.type === "text" && e.text) output += e.text;
+      },
+    });
+  } catch (e) {
+    output = `Ошибка: ${String(e).slice(0, 300)}`;
+  }
+  if (!output.trim()) return;
+  const safe = sanitizeTgHtml(output.slice(0, 4000));
+  const useHtml = balancedHtml(safe);
+  const body = (useHtml ? safe : stripTags(output)).slice(0, 4000);
+  await tg("sendMessage", {
+    chat_id: msg.chat.id,
+    business_connection_id: connId,
+    reply_parameters: { message_id: msg.message_id },
+    text: body,
+    ...(useHtml ? { parse_mode: "HTML" } : {}),
+  }).catch(() => {});
 }
 
 export async function handleTelegramUpdate(body: unknown) {
@@ -848,6 +1110,14 @@ export async function handleTelegramUpdate(body: unknown) {
   if (seen.size > 400) {
     const first = seen.values().next().value;
     if (first !== undefined) seen.delete(first);
+  }
+  if (upd.business_connection) {
+    await handleBusinessConnection(upd.business_connection);
+    return;
+  }
+  if (upd.business_message) {
+    await handleBusinessMessage(upd.business_message);
+    return;
   }
   if (upd.guest_message) {
     await handleGuest(upd.guest_message);

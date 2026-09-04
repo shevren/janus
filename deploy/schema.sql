@@ -162,6 +162,15 @@ CREATE TABLE telegram_link_codes (
   expires_at timestamptz NOT NULL
 );
 
+CREATE TABLE business_connections (
+  connection_id text PRIMARY KEY,
+  telegram_user_id bigint NOT NULL,
+  user_id uuid REFERENCES users(id) ON DELETE CASCADE,
+  rights jsonb NOT NULL DEFAULT '{}',
+  auto_reply boolean NOT NULL DEFAULT false,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE INDEX messages_conv_idx ON messages (conversation_id, created_at);
 CREATE INDEX sessions_user_idx ON sessions (user_id);
 CREATE INDEX approvals_user_idx ON approvals (user_id, status);

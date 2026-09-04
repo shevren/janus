@@ -43,7 +43,7 @@ function decodeDdg(href: string): string {
   }
 }
 
-function parseDdg(html: string): WebResult[] {
+export function parseDdg(html: string): WebResult[] {
   const out: WebResult[] = [];
   const re = /<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
   let m: RegExpExecArray | null;

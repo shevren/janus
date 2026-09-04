@@ -70,10 +70,11 @@ export async function complete(
   row: ProviderRow,
   messages: ChatMsg[],
   tools: ToolSpec[],
+  signal?: AbortSignal,
 ): Promise<ModelOut> {
   const kind = row.kind;
-  if (kind === "anthropic") return anthropic(row, messages, tools);
-  return openaiCompat(row, messages, tools);
+  if (kind === "anthropic") return anthropic(row, messages, tools, signal);
+  return openaiCompat(row, messages, tools, signal);
 }
 
 export async function lookImage(
@@ -120,7 +121,7 @@ export async function lookImage(
   return r.choices[0]?.message?.content ?? "";
 }
 
-async function openaiCompat(row: ProviderRow, messages: ChatMsg[], tools: ToolSpec[]): Promise<ModelOut> {
+async function openaiCompat(row: ProviderRow, messages: ChatMsg[], tools: ToolSpec[], signal?: AbortSignal): Promise<ModelOut> {
   const client = new OpenAI({
     apiKey: keyOf(row) || "x",
     baseURL: row.base_url || (row.kind === "google" ? "https://generativelanguage.googleapis.com/v1beta/openai/" : undefined),
@@ -146,14 +147,17 @@ async function openaiCompat(row: ProviderRow, messages: ChatMsg[], tools: ToolSp
     }
     return { role: m.role as "system" | "user" | "assistant", content: m.content ?? "" };
   });
-  const r = await client.chat.completions.create({
-    model: row.default_model || "gpt-4.1",
-    messages: mapped,
-    tools: tools.map((t) => ({
-      type: "function" as const,
-      function: { name: t.name, description: t.description, parameters: t.parameters },
-    })),
-  });
+  const r = await client.chat.completions.create(
+    {
+      model: row.default_model || "gpt-4.1",
+      messages: mapped,
+      tools: tools.map((t) => ({
+        type: "function" as const,
+        function: { name: t.name, description: t.description, parameters: t.parameters },
+      })),
+    },
+    signal ? { signal } : undefined,
+  );
   const choice = r.choices[0]?.message;
   const toolCalls =
     choice?.tool_calls?.map((c) => ({
@@ -164,24 +168,27 @@ async function openaiCompat(row: ProviderRow, messages: ChatMsg[], tools: ToolSp
   return { text: choice?.content ?? "", toolCalls };
 }
 
-async function anthropic(row: ProviderRow, messages: ChatMsg[], tools: ToolSpec[]): Promise<ModelOut> {
+async function anthropic(row: ProviderRow, messages: ChatMsg[], tools: ToolSpec[], signal?: AbortSignal): Promise<ModelOut> {
   const client = new Anthropic({ apiKey: keyOf(row) });
   const system = messages.filter((m) => m.role === "system").map((m) => m.content ?? "").join("\n");
   const rest = messages.filter((m) => m.role !== "system");
-  const r = await client.messages.create({
-    model: row.default_model || "claude-sonnet-4-20250514",
-    max_tokens: 4096,
-    system: system || undefined,
+  const r = await client.messages.create(
+    {
+      model: row.default_model || "claude-sonnet-4-20250514",
+      max_tokens: 4096,
+      system: system || undefined,
     tools: tools.map((t) => ({
       name: t.name,
       description: t.description,
       input_schema: t.parameters as Anthropic.Tool.InputSchema,
     })),
-    messages: rest.map((m) => ({
-      role: m.role === "assistant" ? "assistant" : "user",
-      content: m.content ?? "",
-    })),
-  });
+      messages: rest.map((m) => ({
+        role: m.role === "assistant" ? "assistant" : "user",
+        content: m.content ?? "",
+      })),
+    },
+    signal ? { signal } : undefined,
+  );
   let text = "";
   const toolCalls: ModelOut["toolCalls"] = [];
   for (const part of r.content) {

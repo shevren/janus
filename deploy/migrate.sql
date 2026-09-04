@@ -26,3 +26,12 @@ CREATE TABLE IF NOT EXISTS telegram_link_codes (
 );
 
 ALTER TABLE bots ADD COLUMN IF NOT EXISTS mode text NOT NULL DEFAULT 'ask';
+
+CREATE TABLE IF NOT EXISTS business_connections (
+  connection_id text PRIMARY KEY,
+  telegram_user_id bigint NOT NULL,
+  user_id uuid REFERENCES users(id) ON DELETE CASCADE,
+  rights jsonb NOT NULL DEFAULT '{}',
+  auto_reply boolean NOT NULL DEFAULT false,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);

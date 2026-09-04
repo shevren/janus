@@ -376,6 +376,8 @@ export async function runAgent(opts: {
   surface?: Surface;
   mode?: AgentMode;
   emit: (e: AgentEvent) => void;
+  signal?: AbortSignal;
+  approvalTimeoutMs?: number;
 }) {
   const surface: Surface = opts.surface ?? "web";
   const mode: AgentMode = parseMode(opts.mode);
@@ -444,7 +446,8 @@ export async function runAgent(opts: {
   const maxSteps = mode === "build" ? 24 : mode === "plan" ? 8 : 12;
   try {
     for (let step = 0; step < maxSteps; step++) {
-      const out = await complete(provider, messages, tools);
+      opts.signal?.throwIfAborted();
+      const out = await complete(provider, messages, tools, opts.signal);
       if (out.text) {
         assistantText += out.text;
         opts.emit({ type: "text", text: out.text });
@@ -469,7 +472,7 @@ export async function runAgent(opts: {
           );
           if (detail) opts.emit({ type: "text", text: detail });
           opts.emit({ type: "approval", id: ap!.id, action: call.name, detail });
-          const ok = await waitApproval(ap!.id);
+          const ok = await waitApproval(ap!.id, opts.approvalTimeoutMs ?? 600000, opts.signal);
           if (!ok) {
             messages.push({ role: "tool", toolCallId: call.id, name: call.name, content: "denied by user" });
             opts.emit({ type: "tool", name: call.name, status: "denied" });
@@ -516,13 +519,16 @@ export async function runAgent(opts: {
   }
 }
 
-async function waitApproval(id: string) {
-  for (let i = 0; i < 600; i++) {
+async function waitApproval(id: string, ms = 600000, signal?: AbortSignal) {
+  const steps = Math.max(1, Math.floor(ms / 1000));
+  for (let i = 0; i < steps; i++) {
+    signal?.throwIfAborted();
     const row = await q1<{ status: string }>(`select status from approvals where id = $1`, [id]);
     if (row?.status === "allowed") return true;
     if (row?.status === "denied") return false;
     await new Promise((r) => setTimeout(r, 1000));
   }
+  await q(`update approvals set status = 'denied' where id = $1 and status = 'pending'`, [id]).catch(() => {});
   return false;
 }
 
