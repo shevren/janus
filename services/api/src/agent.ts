@@ -602,11 +602,16 @@ async function renderCut(
   const target = `cuts/${nameHint}.mp4`;
   const fin = await box.shell(userId, `cd /workspace && ffmpeg -y -f concat -safe 0 -i ${q(`${tmp}/list.txt`)} -c copy ${q(target)} 2>&1 | tail -3 && ls ${q(target)}`);
   await box.shell(userId, `cd /workspace && rm -rf ${q(tmp)} 2>&1`);
-  if (fin.trim().split("\n").pop()?.trim() === target) {
+  if (shellLast(fin) === target) {
     onFile?.(target);
     return { output: `Video rendered: /workspace/${target} (${clean.length} clips)` };
   }
   return { output: `Render failed (needs ffmpeg): ${fin.slice(-400)}` };
+}
+
+/** box.shell appends an "[exit N]" line: last meaningful line decides success. */
+function shellLast(out: string): string {
+  return out.split("\n").map((t) => t.trim()).filter((t) => t && !t.startsWith("[exit")).pop() ?? "";
 }
 
 /** Styled HTML for generated PDFs (weasyprint, DejaVu covers Cyrillic). */
@@ -853,7 +858,7 @@ echo written`);
       const md = `---\ntitle: ${title.replace(/"/g, '\\"')}\n---\n\n${content}`;
       box.writeFile(userId, "presentation.md", md);
       const out = await box.shell(userId, "cd /workspace && pandoc -t pptx -o presentation.pptx presentation.md 2>&1 && ls presentation.pptx");
-      if (out.trim().split("\n").pop()?.trim() === "presentation.pptx") {
+      if (shellLast(out) === "presentation.pptx") {
         onFile?.("presentation.pptx");
         return { output: "Presentation created: /workspace/presentation.pptx" };
       }
@@ -871,7 +876,7 @@ echo written`);
         userId,
         `cd /workspace && convert "${input.replace("/workspace/", "")}" ${safeOps} "${output.replace("/workspace/", "")}" 2>&1 && ls "${output.replace("/workspace/", "")}"`,
       );
-      if (out.trim().split("\n").pop()?.trim() === output.split("/").pop()) {
+      if (shellLast(out) === output.split("/").pop()) {
         onFile?.(output.replace("/workspace/", ""));
         return { output: `Image edited: ${output}` };
       }
@@ -949,7 +954,7 @@ echo written`);
           ? `cd /workspace && pandoc -s --metadata title=${q(title)} -t html5 --css ${q(`${base}.css`)} -o ${q(`${base}.html`)} ${q(`${base}.md`)} 2>&1 && weasyprint ${q(`${base}.html`)} ${q(target)} 2>&1 && ls ${q(target)}`
           : `cd /workspace && pandoc -t ${fmt} -o ${q(target)} ${q(`${base}.md`)} 2>&1 && ls ${q(target)}`;
       const out = await box.shell(userId, cmd);
-      const ok = out.trim().split("\n").pop()?.trim() === target;
+      const ok = shellLast(out) === target;
       const output = ok
         ? `Document written: /workspace/${target}`
         : `Document write failed: ${out.slice(-500) || "(empty converter output)"}`;
