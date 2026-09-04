@@ -31,7 +31,7 @@ export type AgentMode = "ask" | "plan" | "build";
 
 export type AgentEvent =
   | { type: "text"; text: string }
-  | { type: "tool"; name: string; status: string; output?: string }
+  | { type: "tool"; name: string; status: string; output?: string; detail?: string }
   | { type: "approval"; id: string; action: string; detail?: string }
   | { type: "mode"; mode: AgentMode }
   | { type: "takeover"; url: string }
@@ -223,7 +223,8 @@ function sharedTools(searchDesc: string): ToolSpec[] {
     },
     {
       name: "analyze_image",
-      description: "Look at a workspace image, or the live screen if path is empty.",
+      description:
+        "Read text, formulas and content from workspace images (OCR-like). Path can be one file or several comma-separated (e.g. lecture photo sets — pass them all at once). Empty path looks at the live screen instead.",
       parameters: {
         type: "object",
         properties: { path: { type: "string" }, prompt: { type: "string" } },
@@ -269,7 +270,8 @@ function sharedTools(searchDesc: string): ToolSpec[] {
     },
     {
       name: "write_document",
-      description: "Create a formatted document (docx/pdf/odt/html) from markdown or plain content. Saves to /workspace. Use for reports, essays, specs.",
+      description:
+        "Create a formatted document (docx/pdf/odt/html) from markdown or plain content. Saves to /workspace and the file is attached to the chat automatically. Path is optional (auto-named if empty). Always report the /workspace/ path. Use for reports, essays, specs, study notes.",
       parameters: {
         type: "object",
         properties: {
@@ -364,6 +366,7 @@ function telegramStyle(): string {
     "FORMAT (Telegram HTML only, never Markdown): <b>bold</b> for headers and key terms, <i>italic</i> for emphasis, <a href=\"https://...\">link text</a> for every link with its real URL, <code>inline code</code>, <pre>code blocks</pre>, <blockquote>quotes</blockquote>. Lists are plain lines starting with - or 1. No other tags. Escape & as &amp;.",
     "STRUCTURE every answer: <b>headline</b>, one-line TL;DR, then short sections with bold headers. Web answers end with <b>Источники</b> as a numbered list of <a> links you actually read via read_pages. Keep it tight: chat answer, not an essay.",
     "AUDIENCE: students, schoolkids, anyone. Explain like a tutor: simple words first, one concrete example, then the nuance. Russian by default unless the user writes in another language. Never pad with filler ellipsis (...), эээ or empty intros — start with substance.",
+    "FILES: anything you generate under /workspace (pdf, docx, pptx, images) is attached to the chat automatically — just write its /workspace/ path in your reply and confirm what it is.",
     "RESEARCH LOOP for web questions: think (one step) → search_web → read_pages on the best 2-4 URLs → answer with citations. Never invent URLs; only cite pages you read.",
   ].join("\n");
 }
@@ -479,7 +482,7 @@ export async function runAgent(opts: {
             continue;
           }
         }
-        opts.emit({ type: "tool", name: call.name, status: "running" });
+        opts.emit({ type: "tool", name: call.name, status: "running", detail: toolDetail(call.name, args) });
         const result = await runTool({
           userId: opts.userId,
           botId: opts.botId,
@@ -516,6 +519,55 @@ export async function runAgent(opts: {
       assistantText || (mode === "plan" ? "(plan ready)" : "(done)"),
     ]);
     opts.emit({ type: "done" });
+  }
+}
+
+/**
+ * Downscale images before sending to the model: full-res phone photos and
+ * screenshots waste most of the vision latency and context. Returns
+ * [buffer, mime]. Falls back to the original on any error.
+ */
+async function shrinkImage(buf: Buffer, mime: string): Promise<[Buffer, string]> {
+  try {
+    const { default: sharp } = await import("sharp");
+    const out = await sharp(buf)
+      .rotate()
+      .resize(1568, 1568, { fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality: 72 })
+      .toBuffer();
+    if (out.byteLength < buf.byteLength) return [Buffer.from(out), "image/jpeg"];
+    return [buf, mime];
+  } catch {
+    return [buf, mime];
+  }
+}
+
+/** One-line human summary of a tool call for live status lines. */
+function toolDetail(name: string, args: Record<string, unknown>): string {
+  const s = (v: unknown) => String(v ?? "").trim();
+  switch (name) {
+    case "search_web":
+      return s(args.query).slice(0, 80);
+    case "read_pages": {
+      const u = Array.isArray(args.urls) ? args.urls.map(String) : [];
+      const hosts = [...new Set(u.map((x) => { try { return new URL(x).hostname.replace(/^www\./, ""); } catch { return ""; } }).filter(Boolean))];
+      return hosts.slice(0, 3).join(", ").slice(0, 80);
+    }
+    case "wiki":
+      return s(args.title).slice(0, 80);
+    case "analyze_image":
+      return s(args.path).split("/").pop()?.slice(0, 60) ?? "";
+    case "workspace_read":
+    case "github_file":
+      return s(args.path || args.repo).slice(0, 80);
+    case "shell":
+      return s(args.command).slice(0, 80);
+    case "generate_image":
+      return s(args.prompt).slice(0, 80);
+    case "plan":
+      return s((args as { goal?: string }).goal).slice(0, 80);
+    default:
+      return "";
   }
 }
 
@@ -729,11 +781,23 @@ pdflatex -interaction=nonstopmode -output-directory=/workspace formula.tex 2>&1 
     if (name === "analyze_image") {
       const provider = await activeProvider(userId);
       if (!provider) return { output: "No model provider is configured." };
-      const rel = String(args.path ?? "").trim();
-      const buf = rel ? box.readBytes(userId, rel) : await box.snapshot(userId);
-      const mime = rel ? box.imageMime(rel) : "image/png";
-      const text = await lookImage(provider, buf, mime, String(args.prompt ?? ""));
-      return { output: text || "(empty look)" };
+      const raw = Array.isArray(args.path) ? args.path.map(String) : String(args.path ?? "").split(/[\s,]+/);
+      const rels = [...new Set(raw.map((s) => s.trim()).filter(Boolean))].slice(0, 6);
+      const prompt = String(args.prompt ?? "");
+      const look = async (rel: string) => {
+        const buf = box.readBytes(userId, rel);
+        const [small, mime] = await shrinkImage(buf, box.imageMime(rel));
+        const text = await lookImage(provider, small, mime, prompt);
+        return `--- ${rel} ---\n${text || "(empty look)"}`;
+      };
+      if (!rels.length) {
+        const buf = await box.snapshot(userId);
+        const [small, mime] = await shrinkImage(buf, "image/png");
+        const text = await lookImage(provider, small, mime, prompt);
+        return { output: text || "(empty look)" };
+      }
+      const parts = await Promise.all(rels.map(look));
+      return { output: parts.join("\n\n") };
     }
     if (name === "compose_cut") {
       const nameHint = String(args.name ?? "cut").replace(/[^\w.-]+/g, "-");
@@ -766,23 +830,32 @@ pdflatex -interaction=nonstopmode -output-directory=/workspace formula.tex 2>&1 
       return { output: "remembered" };
     }
     if (name === "write_document") {
-      const path = String(args.path ?? "");
-      const format = String(args.format ?? "pdf").toLowerCase();
+      const fmt = ["docx", "pdf", "odt", "html"].includes(String(args.format ?? "").toLowerCase())
+        ? String(args.format).toLowerCase()
+        : "pdf";
       const title = String(args.title ?? "Document");
       const content = String(args.content ?? "");
+      let base = String(args.path ?? "")
+        .trim()
+        .replace(/\.(docx|pdf|odt|html|md)$/i, "")
+        .replace(/\.\./g, "")
+        .replace(/^\/+/, "");
+      if (!base) base = `document-${Date.now()}`;
       const md = `---\ntitle: ${title.replace(/"/g, '\\"')}\n---\n\n${content}`;
-      box.writeFile(userId, path.replace(/\.(docx|pdf|odt|html)$/i, "") + ".md", md);
-      let out = "";
-      if (format === "docx") {
-        out = await box.shell(userId, `cd /workspace && pandoc -t docx -o ${path.replace(/\.(docx|pdf|odt|html)$/i, "")}.docx ${path.replace(/\.(docx|pdf|odt|html)$/i, "")}.md 2>&1`);
-      } else if (format === "pdf") {
-        out = await box.shell(userId, `cd /workspace && pandoc -t pdf -o ${path.replace(/\.(docx|pdf|odt|html)$/i, "")}.pdf ${path.replace(/\.(docx|pdf|odt|html)$/i, "")}.md 2>&1`);
-      } else if (format === "odt") {
-        out = await box.shell(userId, `cd /workspace && pandoc -t odt -o ${path.replace(/\.(docx|pdf|odt|html)$/i, "")}.odt ${path.replace(/\.(docx|pdf|odt|html)$/i, "")}.md 2>&1`);
-      } else if (format === "html") {
-        out = await box.shell(userId, `cd /workspace && pandoc -t html -o ${path.replace(/\.(docx|pdf|odt|html)$/i, "")}.html ${path.replace(/\.(docx|pdf|odt|html)$/i, "")}.md 2>&1`);
-      }
-      return { output: out.includes(path.split("/").pop() ?? "") ? `Document written: /workspace/${path}` : "Document write failed" };
+      box.writeFile(userId, `${base}.md`, md);
+      const target = `${base}.${fmt}`;
+      const q = (s: string) => `"${s.replace(/"/g, "")}"`;
+      // ls echoes the filename ONLY on success (pandoc is silent on success).
+      const out = await box.shell(
+        userId,
+        `cd /workspace && pandoc -t ${fmt} -o ${q(target)} ${q(`${base}.md`)} 2>&1 && ls ${q(target)}`,
+      );
+      const ok = out.trim().split("\n").pop()?.trim() === target;
+      return {
+        output: ok
+          ? `Document written: /workspace/${target}`
+          : `Document write failed: ${out.slice(-500) || "(empty pandoc output — is pandoc installed?)"}`,
+      };
     }
     if (name === "catalog_search") {
       const kind = String(args.kind ?? "any");

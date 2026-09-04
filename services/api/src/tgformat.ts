@@ -24,7 +24,10 @@ export function cleanResponse(src: string): string {
   while (lines.length && /^[\s.…\-–—]+$/.test(lines[0])) lines.shift();
   while (lines.length && /^[\s.…\-–—]+$/.test(lines[lines.length - 1])) lines.pop();
   s = lines.join("\n");
-  s = s.replace(/^(?:response|output|answer|result|результат|ответ)(?:\s*[:\-–—]\s*|\s+(?=[^\s])|(?=[A-ZА-ЯЁ]))/i, "");
+  const label = s.match(/^(response|output|answer|result|результат|ответ)([\s\S]*)$/i);
+  if (label && (/^(?:\s*[:\-–—]+\s*|\s+|$)/.test(label[2]) || /^[A-ZА-ЯЁ]/.test(label[2]))) {
+    s = label[2].replace(/^\s*[:\-–—]+\s*/, "");
+  }
   s = s.replace(/[ \t]*\n{3,}/g, "\n\n");
   return s.trim();
 }

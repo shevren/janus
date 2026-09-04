@@ -5,8 +5,10 @@ import { balancedHtml, chunksOf, cleanResponse, markdownToHtml, sanitizeTgHtml, 
 describe("cleanResponse", () => {
   it("strips control tokens and junk prefixes", () => {
     assert.equal(cleanResponse("<|open|>responseПривет!"), "Привет!");
+    assert.equal(cleanResponse("responseПривет!"), "Привет!");
     assert.equal(cleanResponse("output: done"), "done");
     assert.equal(cleanResponse("Ответ: всё готово"), "всё готово");
+    assert.equal(cleanResponse("responses are fine"), "responses are fine");
   });
   it("trims filler ellipsis lines", () => {
     assert.equal(cleanResponse("...\n\nТекст\n…"), "Текст");

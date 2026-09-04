@@ -8,11 +8,12 @@ import { balancedHtml, chunksOf, cleanResponse, sanitizeTgHtml, stripTags } from
 
 type TgUser = { id: number; username?: string; is_bot?: boolean };
 type TgChat = { id: number; type: string; title?: string };
-type TgPhoto = { file_id: string; file_size?: number };
+type TgPhoto = { file_id: string; file_size?: number; width?: number; height?: number };
 type TgDocument = { file_id: string; mime_type?: string; file_name?: string };
 type TgMessage = {
   message_id: number;
   message_thread_id?: number;
+  media_group_id?: string;
   chat: TgChat;
   from?: TgUser;
   text?: string;
@@ -248,6 +249,23 @@ async function deliver(chatId: number, thinkingId: number | undefined, html: str
   }
 }
 
+// Files the agent just generated (/workspace/*.pdf|docx|...) are attached
+// to the chat automatically so users don't get a bare path. Max 3, 45MB cap.
+async function attachWorkspaceFiles(chatId: number, userId: string, output: string) {
+  const seen = new Set<string>();
+  const files = [...output.matchAll(/\/workspace\/([^\s*`"'<>|]{1,120}\.(pdf|docx|pptx|odt|png|jpe?g|zip))/gi)]
+    .map((m) => m[1])
+    .filter((f) => (seen.has(f) ? false : (seen.add(f), true)))
+    .slice(0, 3);
+  for (const rel of files) {
+    try {
+      const buf = box.readBytes(userId, rel);
+      if (!buf?.length || buf.byteLength > 45 * 1024 * 1024) continue;
+      await sendDocument(chatId, buf, rel.split("/").pop() ?? "file", "Готово — файл выше по запросу.");
+    } catch {}
+  }
+}
+
 async function ephemeral(chatId: number, userId: number, text: string) {
   await tg("sendMessage", { chat_id: userId, text, disable_notification: true }).catch(() => {});
   const t = await tg("sendMessage", { chat_id: chatId, text: "✓ Set (private)", disable_notification: true }) as { message_id?: number } | undefined;
@@ -267,17 +285,21 @@ const READ_TOOLS = new Set([
 
 // Shared progress chain: Думаю → Ищу → Нашёл → Извлекаю (+ Работаю/Подтверждение).
 // Both /ask commands and plain mentions use it, so the status never sticks.
+// Live activity phrases from real tool events (no canned "Думаю...").
 function makeStatus() {
   let phase: "think" | "search" | "found" | "read" | "work" | "approval" | "extract" = "think";
   let sources = 0;
+  let tool = "";
   let detail = "";
+  const short = (s: string, n = 60) => (s.length > n ? `${s.slice(0, n)}…` : s);
   return {
     onEvent(e: AgentEvent) {
       if (e.type === "tool" && e.status === "running") {
-        if (SEARCH_TOOLS.has(e.name ?? "")) phase = "search";
-        else if (READ_TOOLS.has(e.name ?? "")) phase = "read";
+        tool = e.name ?? "";
+        detail = e.detail ?? "";
+        if (SEARCH_TOOLS.has(tool)) phase = "search";
+        else if (READ_TOOLS.has(tool)) phase = "read";
         else phase = "work";
-        detail = e.name ?? "";
       }
       if (e.type === "tool" && e.status === "ok") {
         if (e.name === "search_web") {
@@ -291,13 +313,23 @@ function makeStatus() {
     },
     text() {
       switch (phase) {
-        case "think": return "Думаю";
-        case "search": return "Ищу источники";
-        case "found": return sources > 0 ? `Нашёл ${sources}, читаю` : "Ищу источники";
-        case "read": return "Читаю";
-        case "extract": return "Извлекаю информацию";
-        case "work": return detail ? `Делаю (${detail})` : "Работаю";
-        case "approval": return "Нужно подтверждение — кнопки выше";
+        case "think":
+          return "";
+        case "search":
+          return detail ? `Ищу «${short(detail)}»` : "Ищу";
+        case "found":
+          return sources > 1 ? `Нашёл ${sources} источника` : "Нашёл, читаю";
+        case "read":
+          if (tool === "analyze_image") return "Читаю текст с фото";
+          return detail ? `Читаю ${short(detail)}` : "Читаю";
+        case "extract":
+          return "Извлекаю информацию";
+        case "work":
+          if (tool === "generate_image") return "Рисую";
+          if (tool === "shell") return detail ? `Выполняю ${short(detail, 40)}` : "Выполняю команду";
+          return detail ? `${tool}: ${short(detail)}` : "Работаю";
+        case "approval":
+          return "Нужно подтверждение — кнопки выше";
       }
     },
   };
@@ -310,10 +342,9 @@ function startStatusLoop(chatId: number, thinkingId: number | undefined, st: Ret
     void (async () => {
       if (done || !thinkingId) return;
       const body = st.text();
-      if (body !== last) {
-        last = body;
-        await editMessage(chatId, thinkingId, body);
-      }
+      if (!body || body === last) return;
+      last = body;
+      await editMessage(chatId, thinkingId, body);
     })();
   }, 900);
   return () => {
@@ -398,15 +429,27 @@ function isImageDoc(d?: TgDocument) {
   return !!d && (/^image\//i.test(d.mime_type ?? "") || /\.(png|jpe?g|gif|webp)$/i.test(d.file_name ?? ""));
 }
 
-/** Biggest photo file_id: own photo → reply photo → reply image-document. */
-function photoFileId(msg: TgMessage): string | undefined {
-  if (msg.photo?.length) return msg.photo[msg.photo.length - 1].file_id;
+/** Cheapest sufficient size: smallest variant >=900px wide, else the biggest. */
+function pickSize(sizes: TgPhoto[]): TgPhoto {
+  const big = sizes[sizes.length - 1];
+  const ok = sizes.find((s) => (s.width ?? 0) >= 900);
+  if (ok && (ok.file_size ?? Infinity) < (big.file_size ?? 0)) return ok;
+  return big;
+}
+
+/** All image file_ids: own photo → reply photo → reply image-document. */
+function photoFileIds(msg: TgMessage): string[] {
+  if (msg.photo?.length) return [pickSize(msg.photo).file_id];
   const doc = (msg as { document?: TgDocument }).document;
-  if (isImageDoc(doc)) return doc!.file_id;
+  if (isImageDoc(doc)) return [doc!.file_id];
   const rep = msg.reply_to_message;
-  if (rep?.photo?.length) return rep.photo[rep.photo.length - 1].file_id;
-  if (isImageDoc(rep?.document)) return rep!.document!.file_id;
-  return undefined;
+  if (rep?.photo?.length) return [pickSize(rep.photo).file_id];
+  if (isImageDoc(rep?.document)) return [rep!.document!.file_id];
+  return [];
+}
+
+function photoFileId(msg: TgMessage): string | undefined {
+  return photoFileIds(msg)[0];
 }
 
 async function saveAnyFile(userId: string, fileId: string, hint: string) {
@@ -513,9 +556,8 @@ async function startRun(args: {
     ? setInterval(() => {
         void (async () => {
           if (controller.signal.aborted) return;
-          // No canned status words: native Thinking… placeholder until real
-          // text streams, then the live answer itself.
-          await pushDraft(output ? output.slice(-4000) : "");
+          // Live activity line until real text streams, then the answer.
+          await pushDraft(output ? output.slice(-4000) : st.text());
         })();
       }, 1200)
     : undefined;
@@ -550,6 +592,7 @@ async function startRun(args: {
       return;
     }
     await deliver(args.chatId, args.thinkingId, output);
+    await attachWorkspaceFiles(args.chatId, args.userId, output);
   })();
   userRuns.set(args.tgId, { controller, query: args.job, chatId: args.chatId, thinkingId: args.thinkingId, draftId, tail: run });
   try {
@@ -854,10 +897,15 @@ async function handleMessage(msg: TgMessage) {
   let job = (msg.text ?? msg.caption ?? "").replace(new RegExp(`@${name}\\b`, "ig"), "").trim();
   const replyText = msg.reply_to_message?.text ?? msg.reply_to_message?.caption ?? "";
   if (!job && replyText) job = replyText.replace(new RegExp(`@${name}\\b`, "ig"), "").trim();
-  const img = photoFileId(msg);
-  if (img) {
-    const rel = await savePhoto(userId, img);
-    if (rel) job = `Photo /workspace/${rel}: ${job || "analyze this photo"}`;
+  const album = (msg as { albumPhotos?: string[] }).albumPhotos ?? [];
+  const imgs = [...album, ...photoFileIds(msg)].slice(0, 10);
+  if (imgs.length) {
+    const rels = (await Promise.all(imgs.map((f) => savePhoto(userId, f).catch(() => "")))).filter(Boolean);
+    if (rels.length > 1) {
+      job = `Photos ${rels.map((r) => `/workspace/${r}`).join(", ")}: ${job || "read everything on all photos and make study notes"}`;
+    } else if (rels.length === 1) {
+      job = `Photo /workspace/${rels[0]}: ${job || "analyze this photo"}`;
+    }
   } else {
     const doc = (msg as { document?: TgDocument }).document ?? msg.reply_to_message?.document;
     if (doc) {
@@ -1054,10 +1102,14 @@ async function handleGuest(msg: TgGuestMessage) {
   const m = text.match(/^\/(plan|build|ask)\s+([\s\S]*)$/i);
   const mode = m ? parseMode(m[1].toLowerCase()) : parseMode(bot.mode);
   let job = (m ? m[2] : text).trim() || "help";
-  const img = photoFileId(msg);
-  if (img) {
-    const rel = await savePhoto(acc.user_id, img).catch(() => "");
-    if (rel) job = `Photo /workspace/${rel}: ${job || "analyze this photo"}`;
+  const imgs = photoFileIds(msg).slice(0, 10);
+  if (imgs.length) {
+    const rels = (await Promise.all(imgs.map((f) => savePhoto(acc.user_id, f).catch(() => "")))).filter(Boolean);
+    if (rels.length > 1) {
+      job = `Photos ${rels.map((r) => `/workspace/${r}`).join(", ")}: ${job || "read everything on all photos and make study notes"}`;
+    } else if (rels.length === 1) {
+      job = `Photo /workspace/${rels[0]}: ${job || "analyze this photo"}`;
+    }
   }
   const conv = await ensureConv(acc.user_id, bot.id);
   let answer = "";
@@ -1152,6 +1204,39 @@ async function handleBusinessMessage(msg: TgBusinessMessage) {
   }).catch(() => {});
 }
 
+// Media albums arrive as N messages with one media_group_id. Collect the
+// burst, then handle once with every photo attached.
+const albums = new Map<string, { msgs: TgMessage[]; timer: ReturnType<typeof setTimeout> }>();
+
+async function handleAlbumReady(msgs: TgMessage[]) {
+  if (!msgs.length) return;
+  const base = msgs[0];
+  const photos = msgs.flatMap((m) => (m.photo?.length ? [pickSize(m.photo).file_id] : []));
+  const caption = msgs.map((m) => m.caption ?? "").find((c) => c.trim()) ?? "";
+  const merged = { ...base, photo: [], caption } as TgMessage & { albumPhotos?: string[] };
+  merged.albumPhotos = photos;
+  await handleMessage(merged);
+}
+
+function handleAlbumMessage(msg: TgMessage) {
+  const gid = msg.media_group_id!;
+  let a = albums.get(gid);
+  if (!a) {
+    a = { msgs: [], timer: setTimeout(() => {}, 0) };
+    albums.set(gid, a);
+  }
+  a.msgs.push(msg);
+  clearTimeout(a.timer);
+  a.timer = setTimeout(() => {
+    albums.delete(gid);
+    void handleAlbumReady(a!.msgs);
+  }, 2500);
+  if (albums.size > 50) {
+    const first = albums.keys().next().value;
+    if (first !== undefined) albums.delete(first);
+  }
+}
+
 export async function handleTelegramUpdate(body: unknown) {
   const upd = body as TgUpdate;
   if (!upd?.update_id) return;
@@ -1189,5 +1274,9 @@ export async function handleTelegramUpdate(body: unknown) {
     return;
   }
   if (upd.chosen_inline_result) return;
+  if (upd.message?.media_group_id) {
+    handleAlbumMessage(upd.message);
+    return;
+  }
   if (upd.message) await handleMessage(upd.message);
 }
