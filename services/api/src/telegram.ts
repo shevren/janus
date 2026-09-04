@@ -1,8 +1,10 @@
 import { createHash, randomBytes } from "node:crypto";
 import { parseMode, runAgent, type AgentEvent, type AgentMode } from "./agent.js";
+import { seedDefaultMcps } from "./catalog.js";
 import { config } from "./config.js";
 import { encrypt } from "./crypto.js";
 import { q, q1 } from "./db.js";
+import { seedDefaultSkills } from "./skills.js";
 import * as box from "./sandbox.js";
 import { balancedHtml, chunksOf, cleanResponse, sanitizeTgHtml, stripTags } from "./tgformat.js";
 
@@ -249,8 +251,19 @@ async function deliver(chatId: number, thinkingId: number | undefined, html: str
   }
 }
 
-// Files the agent just generated (/workspace/*.pdf|docx|...) are attached
-// to the chat automatically so users don't get a bare path. Max 3, 45MB cap.
+// Files the agent generated (tracked rels first, then /workspace paths found
+// in the text) are attached to the chat automatically. Max 3, 45MB cap.
+async function attachRels(chatId: number, userId: string, rels: string[]) {
+  const seen = new Set<string>();
+  for (const rel of rels.filter((f) => (seen.has(f) ? false : (seen.add(f), true))).slice(0, 3)) {
+    try {
+      const buf = box.readBytes(userId, rel);
+      if (!buf?.length || buf.byteLength > 45 * 1024 * 1024) continue;
+      await sendDocument(chatId, buf, rel.split("/").pop() ?? "file", "Готово — файл выше по запросу.");
+    } catch {}
+  }
+}
+
 async function attachWorkspaceFiles(chatId: number, userId: string, output: string) {
   const seen = new Set<string>();
   const files = [...output.matchAll(/\/workspace\/([^\s*`"'<>|]{1,120}\.(pdf|docx|pptx|odt|png|jpe?g|zip))/gi)]
@@ -325,7 +338,12 @@ function makeStatus() {
         case "extract":
           return "Извлекаю информацию";
         case "work":
-          if (tool === "generate_image") return "Рисую";
+          if (detail.startsWith("MCP ")) return `Применяю ${detail}`;
+          if (tool === "generate_image") return detail ? `Рисую «${short(detail)}»` : "Рисую";
+          if (tool === "write_document") return detail ? `Пишу документ «${short(detail)}»` : "Пишу документ";
+          if (tool === "make_presentation") return "Делаю презентацию";
+          if (tool === "render_latex") return "Рендерю формулу";
+          if (tool === "edit_image") return "Редактирую фото";
           if (tool === "shell") return detail ? `Выполняю ${short(detail, 40)}` : "Выполняю команду";
           return detail ? `${tool}: ${short(detail)}` : "Работаю";
         case "approval":
@@ -537,6 +555,7 @@ async function startRun(args: {
   const draftId = useDraft ? 1 + Math.floor(Math.random() * 2 ** 31) : 0;
   const stopStatus = useDraft ? () => {} : startStatusLoop(args.chatId, args.thinkingId, st);
   let output = "";
+  const files: string[] = [];
   let lastSent = "";
   const pushDraft = async (text: string) => {
     if (text === lastSent) return;
@@ -572,6 +591,7 @@ async function startRun(args: {
         mode: args.mode,
         signal: controller.signal,
         approvalTimeoutMs: 180000,
+        files,
         emit: (e: AgentEvent) => {
           st.onEvent(e);
           if (e.type === "approval") void askApproval(args.chatId, e.id, e.action, e.detail);
@@ -593,6 +613,7 @@ async function startRun(args: {
     }
     await deliver(args.chatId, args.thinkingId, output);
     await attachWorkspaceFiles(args.chatId, args.userId, output);
+    await attachRels(args.chatId, args.userId, files);
   })();
   userRuns.set(args.tgId, { controller, query: args.job, chatId: args.chatId, thinkingId: args.thinkingId, draftId, tail: run });
   try {
@@ -744,7 +765,7 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
 
     if (cmd === "/help") {
       if (thinkingId) await deleteMessage(chatId, thinkingId);
-      await send(chatId, "Janus — твой агент везде. В любом чате без добавления: просто упомяни @JanusWorkBot с вопросом — отвечу сам (guest), либо @JanusWorkBot <запрос> и выбери результат (inline). На фото можно отвечать reply + упоминание. С ботом в группе: /ask /plan /build или упомяни меня. В личке: просто пиши, файлы и фото — в inbox. Секретарь для своих чатов: /secretary on.");
+      await send(chatId, "Janus — твой агент везде. В любом чате без добавления: просто упомяни @JanusWorkBot с вопросом — отвечу сам (guest), либо @JanusWorkBot <запрос> и выбери результат (inline). На фото отвечай reply + упоминание, можно альбомом. С ботом в группе: /ask /plan /build или упомяни меня. В личке: просто пиши, файлы и фото — в inbox. Документы (pdf/docx/pptx) прикрепляю сам. MCP и скиллы: попроси «установи MCP X» — найду и поставлю. Секретарь для своих чатов: /secretary on.");
       return;
     }
     if (cmd === "/model") {
@@ -850,6 +871,8 @@ async function handleMessage(msg: TgMessage) {
       userId = created!.id;
       const botName = email.split("@")[0] + "-agent";
       await q(`insert into bots (user_id,name,mode) values ($1,$2,'ask') on conflict do nothing`, [userId, botName]);
+      await seedDefaultSkills(userId).catch(() => {});
+      await seedDefaultMcps(userId).catch(() => {});
       if (config.agentModelApiKey) {
         await q(`insert into model_providers (user_id,kind,name,base_url,api_key_enc,default_model) values ($1,'openai','janus-default',$2,$3,$4) on conflict do nothing`, [userId, config.agentModelBaseUrl || null, encrypt(config.agentModelApiKey), config.agentModelDefault]);
       }

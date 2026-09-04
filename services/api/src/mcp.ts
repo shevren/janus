@@ -45,12 +45,12 @@ async function connect(row: ServerRow): Promise<Client> {
   return client;
 }
 
-export async function mcpTools(userId: string): Promise<(ToolSpec & { serverId: string })[]> {
+export async function mcpTools(userId: string): Promise<(ToolSpec & { serverId: string; serverName: string })[]> {
   const rows = await q<ServerRow>(
     `select * from mcp_servers where user_id = $1 and enabled = true`,
     [userId],
   );
-  const out: (ToolSpec & { serverId: string })[] = [];
+  const out: (ToolSpec & { serverId: string; serverName: string })[] = [];
   for (const row of rows) {
     try {
       const c = await connect(row);
@@ -58,6 +58,7 @@ export async function mcpTools(userId: string): Promise<(ToolSpec & { serverId: 
       for (const t of listed.tools) {
         out.push({
           serverId: row.id,
+          serverName: row.name,
           name: `mcp_${row.name}_${t.name}`.replace(/\W/g, "_"),
           description: t.description ?? t.name,
           parameters: (t.inputSchema as Record<string, unknown>) ?? { type: "object", properties: {} },

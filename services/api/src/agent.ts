@@ -367,6 +367,8 @@ function telegramStyle(): string {
     "STRUCTURE every answer: <b>headline</b>, one-line TL;DR, then short sections with bold headers. Web answers end with <b>Источники</b> as a numbered list of <a> links you actually read via read_pages. Keep it tight: chat answer, not an essay.",
     "AUDIENCE: students, schoolkids, anyone. Explain like a tutor: simple words first, one concrete example, then the nuance. Russian by default unless the user writes in another language. Never pad with filler ellipsis (...), эээ or empty intros — start with substance.",
     "FILES: anything you generate under /workspace (pdf, docx, pptx, images) is attached to the chat automatically — just write its /workspace/ path in your reply and confirm what it is.",
+    "DOCUMENTS: structure with a title, one-line summary, ## sections, tables for comparisons, lists for steps. No filler.",
+    "MCP/SKILLS: context7 (fresh library docs) and sequential-thinking are installed. Check fresh docs via MCP before coding with any library, use sequential thinking for hard problems, and mention briefly what you applied (e.g. «применил MCP context7»). If the user asks for a new MCP or skill, use catalog_search, propose, then catalog_install — you are the installer.",
     "RESEARCH LOOP for web questions: think (one step) → search_web → read_pages on the best 2-4 URLs → answer with citations. Never invent URLs; only cite pages you read.",
   ].join("\n");
 }
@@ -381,6 +383,8 @@ export async function runAgent(opts: {
   emit: (e: AgentEvent) => void;
   signal?: AbortSignal;
   approvalTimeoutMs?: number;
+  /** Collects /workspace rels of generated files for the caller to attach. */
+  files?: string[];
 }) {
   const surface: Surface = opts.surface ?? "web";
   const mode: AgentMode = parseMode(opts.mode);
@@ -404,6 +408,14 @@ export async function runAgent(opts: {
     [opts.botId],
   );
   let mcp = await mcpTools(opts.userId);
+  // tool name -> "server/tool" labels for live status lines ("применяю MCP …").
+  const mcpLabel = (name: string): string | undefined => {
+    const hit = mcp.find((t) => t.name === name);
+    if (!hit) return undefined;
+    const prefix = `mcp_${hit.serverName}_`.replace(/\W/g, "_");
+    const tool = name.startsWith(prefix) ? name.slice(prefix.length) : "";
+    return `MCP ${hit.serverName}${tool ? `: ${tool}` : ""}`;
+  };
   let tools: ToolSpec[] = toolsFor(surface, mode, mcp);
 
   const system = [
@@ -482,7 +494,7 @@ export async function runAgent(opts: {
             continue;
           }
         }
-        opts.emit({ type: "tool", name: call.name, status: "running", detail: toolDetail(call.name, args) });
+        opts.emit({ type: "tool", name: call.name, status: "running", detail: mcpLabel(call.name) ?? toolDetail(call.name, args) });
         const result = await runTool({
           userId: opts.userId,
           botId: opts.botId,
@@ -490,6 +502,7 @@ export async function runAgent(opts: {
           name: call.name,
           args,
           mcp,
+          onFile: opts.files ? (rel: string) => void opts.files!.push(rel) : undefined,
         });
         if (result.takeover) {
           held = true;
@@ -542,6 +555,17 @@ async function shrinkImage(buf: Buffer, mime: string): Promise<[Buffer, string]>
   }
 }
 
+/** Styled HTML for generated PDFs (weasyprint, DejaVu covers Cyrillic). */
+const DOC_CSS = `body{font-family:'DejaVu Sans','Liberation Sans',sans-serif;line-height:1.6;color:#1a1a1a;max-width:100%;margin:0}
+@page{size:A4;margin:22mm 18mm}h1{font-size:24px;border-bottom:3px solid #0B0B0C;padding-bottom:8px;margin-top:0}
+h2{font-size:19px;color:#2a2a2e;margin-top:26px;border-left:4px solid #2C2C32;padding-left:10px}
+h3{font-size:16px;color:#3a3a40}table{border-collapse:collapse;width:100%;margin:12px 0}
+th,td{border:1px solid #ccc;padding:7px 10px;text-align:left}th{background:#0B0B0C;color:#fff}
+code{background:#f1f1f4;padding:1px 6px;border-radius:4px;font-size:13px}
+pre{background:#0B0B0C;color:#e8e8ea;padding:14px;border-radius:8px;white-space:pre-wrap}
+blockquote{border-left:3px solid #888;margin:12px 0;padding:6px 14px;color:#444;background:#f6f6f8}
+a{color:#1a56db}ul,ol{padding-left:22px}li{margin:4px 0}`;
+
 /** One-line human summary of a tool call for live status lines. */
 function toolDetail(name: string, args: Record<string, unknown>): string {
   const s = (v: unknown) => String(v ?? "").trim();
@@ -564,6 +588,14 @@ function toolDetail(name: string, args: Record<string, unknown>): string {
       return s(args.command).slice(0, 80);
     case "generate_image":
       return s(args.prompt).slice(0, 80);
+    case "write_document":
+      return s(args.title || args.path).slice(0, 80);
+    case "make_presentation":
+      return s(args.title).slice(0, 80);
+    case "render_latex":
+      return s(args.latex).slice(0, 60);
+    case "edit_image":
+      return s(args.input).split("/").pop()?.slice(0, 60) ?? "";
     case "plan":
       return s((args as { goal?: string }).goal).slice(0, 80);
     default:
@@ -601,8 +633,9 @@ async function runTool(opts: {
   name: string;
   args: Record<string, unknown>;
   mcp: { name: string }[];
+  onFile?: (rel: string) => void;
 }): Promise<{ output: string; takeover?: string }> {
-  const { userId, name, args, mcp, surface } = opts;
+  const { userId, name, args, mcp, surface, onFile } = opts;
   try {
     if (name === "plan") {
       return { output: `${formatPlan(args)}\nAllowed. Switch to Build to execute, or keep going if you are already in Build.` };
@@ -728,8 +761,10 @@ async function runTool(opts: {
         if (url) {
           const img = await fetch(url);
           const buf = Buffer.from(await img.arrayBuffer());
-          box.writeBytes(userId, `images/${Date.now()}.png`, buf);
-          return { output: `Image generated: /workspace/images/${Date.now()}.png` };
+          const rel = `images/${Date.now()}.png`;
+          box.writeBytes(userId, rel, buf);
+          onFile?.(rel);
+          return { output: `Image generated: /workspace/${rel}` };
         }
         return { output: "Image generation failed: no URL" };
       } catch (e) {
@@ -740,7 +775,7 @@ async function runTool(opts: {
       const latex = String(args.latex ?? "");
       if (!latex.trim()) return { output: "No latex provided" };
       const safe = latex.replace(/'/g, "'\\''").replace(/"/g, '\\"');
-      const out = await box.shell(userId, `cd /workspace && cat > formula.tex <<'EOF'
+      await box.shell(userId, `cd /workspace && cat > formula.tex <<'EOF'
 \\documentclass{article}
 \\usepackage{amsmath}
 \\begin{document}
@@ -749,20 +784,23 @@ ${safe}
 \\]
 \\end{document}
 EOF
-pdflatex -interaction=nonstopmode -output-directory=/workspace formula.tex 2>&1 | tail -20`);
-      if (out.includes("formula.pdf")) {
+echo written`);
+      const pdf = await box.shell(userId, "cd /workspace && pdflatex -interaction=nonstopmode -output-directory=/workspace formula.tex 2>&1 | tail -5");
+      if (pdf.includes("formula.pdf") || pdf.includes("Output written")) {
         await box.shell(userId, "cd /workspace && convert -density 300 -background white -alpha remove formula.pdf formula.png 2>&1");
+        onFile?.("formula.png");
         return { output: "LaTeX rendered: /workspace/formula.png" };
       }
-      return { output: "LaTeX render failed: " + out.slice(-200) };
+      return { output: "LaTeX render failed (needs pdflatex): " + pdf.slice(-200) };
     }
     if (name === "make_presentation") {
       const title = String(args.title ?? "Presentation");
       const content = String(args.content ?? "");
       const md = `---\ntitle: ${title.replace(/"/g, '\\"')}\n---\n\n${content}`;
       box.writeFile(userId, "presentation.md", md);
-      const out = await box.shell(userId, "cd /workspace && pandoc -t pptx -o presentation.pptx presentation.md 2>&1");
-      if (out.includes("presentation.pptx") || !out.includes("Error")) {
+      const out = await box.shell(userId, "cd /workspace && pandoc -t pptx -o presentation.pptx presentation.md 2>&1 && ls presentation.pptx");
+      if (out.trim().split("\n").pop()?.trim() === "presentation.pptx") {
+        onFile?.("presentation.pptx");
         return { output: "Presentation created: /workspace/presentation.pptx" };
       }
       return { output: "Presentation failed: " + out.slice(-200) };
@@ -775,8 +813,15 @@ pdflatex -interaction=nonstopmode -output-directory=/workspace formula.tex 2>&1 
       }
       const output = input.replace(/\.(png|jpg|jpeg|gif)$/i, "_edited.$1");
       const safeOps = ops.replace(/"/g, '\\"');
-      const out = await box.shell(userId, `cd /workspace && convert "${input.replace("/workspace/", "")}" ${safeOps} "${output.replace("/workspace/", "")}" 2>&1`);
-      return { output: out.includes(output.split("/").pop() ?? "") ? `Image edited: ${output}` : `Edit failed: ${out.slice(-200)}` };
+      const out = await box.shell(
+        userId,
+        `cd /workspace && convert "${input.replace("/workspace/", "")}" ${safeOps} "${output.replace("/workspace/", "")}" 2>&1 && ls "${output.replace("/workspace/", "")}"`,
+      );
+      if (out.trim().split("\n").pop()?.trim() === output.split("/").pop()) {
+        onFile?.(output.replace("/workspace/", ""));
+        return { output: `Image edited: ${output}` };
+      }
+      return { output: `Edit failed (needs ImageMagick convert): ${out.slice(-200)}` };
     }
     if (name === "analyze_image") {
       const provider = await activeProvider(userId);
@@ -843,19 +888,22 @@ pdflatex -interaction=nonstopmode -output-directory=/workspace formula.tex 2>&1 
       if (!base) base = `document-${Date.now()}`;
       const md = `---\ntitle: ${title.replace(/"/g, '\\"')}\n---\n\n${content}`;
       box.writeFile(userId, `${base}.md`, md);
+      box.writeFile(userId, `${base}.css`, DOC_CSS);
       const target = `${base}.${fmt}`;
       const q = (s: string) => `"${s.replace(/"/g, "")}"`;
-      // ls echoes the filename ONLY on success (pandoc is silent on success).
-      const out = await box.shell(
-        userId,
-        `cd /workspace && pandoc -t ${fmt} -o ${q(target)} ${q(`${base}.md`)} 2>&1 && ls ${q(target)}`,
-      );
+      // ls echoes the filename ONLY on success (converters are quiet on success).
+      // PDF goes md -> styled html -> weasyprint (no texlive needed, Cyrillic-safe).
+      const cmd =
+        fmt === "pdf"
+          ? `cd /workspace && pandoc -s --metadata title=${q(title)} -t html5 --css ${q(`${base}.css`)} -o ${q(`${base}.html`)} ${q(`${base}.md`)} 2>&1 && weasyprint ${q(`${base}.html`)} ${q(target)} 2>&1 && ls ${q(target)}`
+          : `cd /workspace && pandoc -t ${fmt} -o ${q(target)} ${q(`${base}.md`)} 2>&1 && ls ${q(target)}`;
+      const out = await box.shell(userId, cmd);
       const ok = out.trim().split("\n").pop()?.trim() === target;
-      return {
-        output: ok
-          ? `Document written: /workspace/${target}`
-          : `Document write failed: ${out.slice(-500) || "(empty pandoc output — is pandoc installed?)"}`,
-      };
+      const output = ok
+        ? `Document written: /workspace/${target}`
+        : `Document write failed: ${out.slice(-500) || "(empty converter output)"}`;
+      if (ok) onFile?.(target);
+      return { output };
     }
     if (name === "catalog_search") {
       const kind = String(args.kind ?? "any");

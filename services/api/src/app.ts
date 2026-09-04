@@ -14,6 +14,7 @@ import { githubConn } from "./github.js";
 import { dropMcp } from "./mcp.js";
 import * as box from "./sandbox.js";
 import { seedDefaultSkills } from "./skills.js";
+import { seedDefaultMcps } from "./catalog.js";
 import {
   createTelegramLink,
   handleTelegramUpdate,
@@ -54,6 +55,7 @@ export async function buildApp() {
       "Own open tasks. Ask before sending or deleting. Keep durable notes in /workspace.",
     ]);
     await seedDefaultSkills(user!.id);
+    await seedDefaultMcps(user!.id);
     await createSession(reply, user!.id);
     return { ok: true };
   });
@@ -594,6 +596,7 @@ async function upsertOauth(provider: string, subject: string, email: string, nam
       "Own open tasks. Ask before sending or deleting.",
     ]);
     await seedDefaultSkills(user!.id);
+    await seedDefaultMcps(user!.id);
   }
   await q(`insert into oauth_accounts (user_id, provider, subject, email) values ($1,$2,$3,$4)`, [
     user!.id,

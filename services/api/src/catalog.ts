@@ -74,6 +74,13 @@ const KNOWN_MCP: KnownMcp[] = [
     command: "npx -y @modelcontextprotocol/server-sequential-thinking",
   },
   {
+    id: "context7",
+    name: "context7",
+    aliases: ["context7", "docs", "documentation", "library docs", "fresh docs"],
+    summary: "Fresh library/framework docs (Context7). Use before writing code with any library.",
+    command: "npx -y @upstash/context7-mcp",
+  },
+  {
     id: "sqlite",
     name: "sqlite",
     aliases: ["sqlite", "sql mcp"],
@@ -402,6 +409,19 @@ export async function catalogInstall(
   const id = String(args.id ?? "");
   if (kind === "skill") return installSkill(userId, id, args);
   return installMcp(userId, id, args);
+}
+
+/** Default MCP set for every new account: docs + structured thinking. No keys needed. */
+export async function seedDefaultMcps(userId: string) {
+  const existing = await q1(`select 1 from mcp_servers where user_id = $1 limit 1`, [userId]);
+  if (existing) return;
+  for (const id of ["known:context7", "known:sequential-thinking"]) {
+    try {
+      await installMcp(userId, id, {});
+    } catch {
+      /* best effort */
+    }
+  }
 }
 
 async function installSkill(userId: string, id: string, args: Record<string, unknown>): Promise<string> {
