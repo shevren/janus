@@ -31,12 +31,14 @@ type TgBusinessConnection = {
   can_reply?: boolean;
   rights?: Record<string, unknown>;
 };
+type TgStopped = { chat: TgChat; draft_id: number };
 type TgUpdate = {
   update_id: number;
   message?: TgMessage;
   guest_message?: TgGuestMessage;
   business_connection?: TgBusinessConnection;
   business_message?: TgBusinessMessage;
+  stopped_message_generation?: TgStopped;
   callback_query?: {
     id: string;
     from: TgUser;
@@ -103,7 +105,7 @@ export async function registerTelegramWebhook() {
   const raw = config.publicUrl;
   const webhookOk =
     raw.startsWith("https://") && !raw.includes("sslip.io") && !raw.includes("localhost") && !raw.includes("127.0.0.1");
-  const updates = ["message", "guest_message", "business_connection", "business_message", "callback_query", "inline_query", "chosen_inline_result"];
+  const updates = ["message", "guest_message", "business_connection", "business_message", "stopped_message_generation", "callback_query", "inline_query", "chosen_inline_result"];
   if (!webhookOk) {
     await tg("deleteWebhook").catch(() => {});
     startPolling(updates);
@@ -146,7 +148,7 @@ export function startPolling(allowed?: string[]) {
   let offset = 0;
   const loop = async () => {
     try {
-      const res = (await tg("getUpdates", { offset, timeout: 30, allowed_updates: allowed ?? ["message", "guest_message", "business_connection", "business_message", "callback_query", "inline_query", "chosen_inline_result"] })) as { result?: TgUpdate[] };
+      const res = (await tg("getUpdates", { offset, timeout: 30, allowed_updates: allowed ?? ["message", "guest_message", "business_connection", "business_message", "stopped_message_generation", "callback_query", "inline_query", "chosen_inline_result"] })) as { result?: TgUpdate[] };
       const arr = Array.isArray((res as unknown as { result?: TgUpdate[] })?.result) ? (res as unknown as { result: TgUpdate[] }).result : Array.isArray(res) ? (res as unknown as TgUpdate[]) : [];
       for (const u of arr) {
         offset = (u.update_id ?? 0) + 1;
@@ -223,10 +225,8 @@ async function editMessage(chatId: number, messageId: number, text: string, extr
 
 // Final answer delivery: sanitized HTML, chunked, plain-text fallback.
 // Never truncates long answers to the first 4000 chars anymore.
-// threadId keeps answers inside the PM forum topic they came from.
-async function deliver(chatId: number, thinkingId: number | undefined, html: string, threadId?: number) {
+async function deliver(chatId: number, thinkingId: number | undefined, html: string) {
   const parts = chunksOf(html.trim() || "(done)");
-  const thread = threadId ? { message_thread_id: threadId } : {};
   let first = true;
   for (const p of parts) {
     const safe = sanitizeTgHtml(p);
@@ -237,12 +237,12 @@ async function deliver(chatId: number, thinkingId: number | undefined, html: str
       if (first && thinkingId) {
         await tg("editMessageText", { chat_id: chatId, message_id: thinkingId, text, ...params });
       } else {
-        await tg("sendMessage", { chat_id: chatId, text, ...params, ...thread });
+        await tg("sendMessage", { chat_id: chatId, text, ...params });
       }
     } catch {
       const plain = stripTags(p).slice(0, 4000);
       if (first && thinkingId) await editMessage(chatId, thinkingId, plain);
-      else await send(chatId, plain, thread);
+      else await send(chatId, plain);
     }
     first = false;
   }
@@ -322,10 +322,9 @@ function startStatusLoop(chatId: number, thinkingId: number | undefined, st: Ret
   };
 }
 
-async function askApproval(chatId: number, id: string, action: string, detail?: string, threadId?: number) {
+async function askApproval(chatId: number, id: string, action: string, detail?: string) {
   await tg("sendMessage", {
     chat_id: chatId,
-    ...(threadId ? { message_thread_id: threadId } : {}),
     text: `Подтвердить: ${action}${detail ? `\n${detail.slice(0, 300)}` : ""}`,
     reply_markup: {
       inline_keyboard: [
@@ -439,6 +438,7 @@ type UserRun = {
   query: string;
   chatId: number;
   thinkingId?: number;
+  draftId?: number;
   tail: Promise<void>;
 };
 const userRuns = new Map<number, UserRun>();
@@ -484,12 +484,40 @@ async function startRun(args: {
   mode: AgentMode;
   chatId: number;
   thinkingId?: number;
-  threadId?: number;
+  isPrivate?: boolean;
 }): Promise<void> {
   const controller = new AbortController();
   const st = makeStatus();
-  const stop = startStatusLoop(args.chatId, args.thinkingId, st);
+  // PM chats: native streaming draft (Thinking… + Stop button) instead of
+  // a "Думаю..." message. Groups keep the editable status message.
+  const useDraft = !!args.isPrivate;
+  const draftId = useDraft ? 1 + Math.floor(Math.random() * 2 ** 31) : 0;
+  const stopStatus = useDraft ? () => {} : startStatusLoop(args.chatId, args.thinkingId, st);
   let output = "";
+  let lastSent = "";
+  const pushDraft = async (text: string) => {
+    if (text === lastSent) return;
+    lastSent = text;
+    const safe = sanitizeTgHtml(text);
+    const useHtml = balancedHtml(safe);
+    await tg("sendMessageDraft", {
+      chat_id: args.chatId,
+      draft_id: draftId,
+      text: (useHtml ? safe : stripTags(text)).slice(0, 4000),
+      ...(useHtml ? { parse_mode: "HTML" } : {}),
+      can_stop: true,
+    }).catch(() => {});
+  };
+  if (useDraft) await pushDraft("");
+  const draftTimer = useDraft
+    ? setInterval(() => {
+        void (async () => {
+          if (controller.signal.aborted) return;
+          const body = output ? output.slice(-4000) : st.text();
+          await pushDraft(body);
+        })();
+      }, 1200)
+    : undefined;
   const run = (async () => {
     try {
       await runAgent({
@@ -503,18 +531,26 @@ async function startRun(args: {
         approvalTimeoutMs: 180000,
         emit: (e: AgentEvent) => {
           st.onEvent(e);
-          if (e.type === "approval") void askApproval(args.chatId, e.id, e.action, e.detail, args.threadId);
+          if (e.type === "approval") void askApproval(args.chatId, e.id, e.action, e.detail);
           if (e.type === "text" && e.text) output += e.text;
         },
       });
     } catch (e) {
       if (!isAbortError(e)) output = `Ошибка: ${String(e).slice(0, 500)}`;
     } finally {
-      stop();
+      stopStatus();
+      if (draftTimer) clearInterval(draftTimer);
     }
-    if (!controller.signal.aborted) await deliver(args.chatId, args.thinkingId, output, args.threadId);
+    if (controller.signal.aborted) {
+      // Stopped by the user via the Stop button: persist what we have.
+      if (controller.signal.reason === "stop" && output.trim()) {
+        await deliver(args.chatId, args.thinkingId, `${output}\n\n⏹ Остановлено.`);
+      }
+      return;
+    }
+    await deliver(args.chatId, args.thinkingId, output);
   })();
-  userRuns.set(args.tgId, { controller, query: args.job, chatId: args.chatId, thinkingId: args.thinkingId, tail: run });
+  userRuns.set(args.tgId, { controller, query: args.job, chatId: args.chatId, thinkingId: args.thinkingId, draftId, tail: run });
   try {
     await run;
   } finally {
@@ -536,7 +572,7 @@ async function runUserJob(args: {
   mode: AgentMode;
   chatId: number;
   thinkingId?: number;
-  threadId?: number;
+  isPrivate?: boolean;
 }): Promise<void> {
   const prev = userRuns.get(args.tgId);
   if (prev && !prev.controller.signal.aborted) {
@@ -642,8 +678,10 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
   const userId = acc ?? (chatOwner ? { user_id: chatOwner.owner_user_id } : null);
   
   await deleteMessage(chatId, msg.message_id);
-  const thread = msg.message_thread_id ? { message_thread_id: msg.message_thread_id } : {};
-  const thinking = await tg("sendMessage", { chat_id: chatId, text: "Думаю...", ...thread }) as { message_id?: number } | undefined;
+  const isPrivate = msg.chat.type === "private";
+  const thinking = isPrivate
+    ? undefined
+    : (await tg("sendMessage", { chat_id: chatId, text: "Думаю..." }).catch(() => undefined) as { message_id?: number } | undefined);
   const thinkingId = thinking?.message_id;
   
   try {
@@ -719,7 +757,7 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
         mode,
         chatId,
         thinkingId,
-        threadId: msg.message_thread_id,
+        isPrivate,
       });
       return;
     }
@@ -830,8 +868,10 @@ async function handleMessage(msg: TgMessage) {
   if (!job) return;
   
   await deleteMessage(msg.chat.id, msg.message_id);
-  const mthread = msg.message_thread_id ? { message_thread_id: msg.message_thread_id } : {};
-  const thinking = await tg("sendMessage", { chat_id: msg.chat.id, text: "Думаю...", ...mthread }) as { message_id?: number } | undefined;
+  const pm = msg.chat.type === "private";
+  const thinking = pm
+    ? undefined
+    : (await tg("sendMessage", { chat_id: msg.chat.id, text: "Думаю..." }).catch(() => undefined) as { message_id?: number } | undefined);
   const thinkingId = thinking?.message_id;
 
   const conv = await ensureConv(userId, bot.id);
@@ -844,7 +884,7 @@ async function handleMessage(msg: TgMessage) {
     mode: parseMode(bot.mode),
     chatId: msg.chat.id,
     thinkingId,
-    threadId: msg.message_thread_id,
+    isPrivate: pm,
   });
 }
 
@@ -1117,6 +1157,13 @@ export async function handleTelegramUpdate(body: unknown) {
   }
   if (upd.business_message) {
     await handleBusinessMessage(upd.business_message);
+    return;
+  }
+  if (upd.stopped_message_generation) {
+    // User hit Stop on a streaming draft: abort that PM run.
+    const s = upd.stopped_message_generation;
+    const run = userRuns.get(s.chat.id);
+    if (run && run.draftId === s.draft_id) run.controller.abort("stop");
     return;
   }
   if (upd.guest_message) {
