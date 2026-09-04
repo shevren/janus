@@ -4,7 +4,7 @@ import { config } from "./config.js";
 import { encrypt } from "./crypto.js";
 import { q, q1 } from "./db.js";
 import * as box from "./sandbox.js";
-import { balancedHtml, chunksOf, sanitizeTgHtml, stripTags } from "./tgformat.js";
+import { balancedHtml, chunksOf, cleanResponse, sanitizeTgHtml, stripTags } from "./tgformat.js";
 
 type TgUser = { id: number; username?: string; is_bot?: boolean };
 type TgChat = { id: number; type: string; title?: string };
@@ -226,7 +226,7 @@ async function editMessage(chatId: number, messageId: number, text: string, extr
 // Final answer delivery: sanitized HTML, chunked, plain-text fallback.
 // Never truncates long answers to the first 4000 chars anymore.
 async function deliver(chatId: number, thinkingId: number | undefined, html: string) {
-  const parts = chunksOf(html.trim() || "(done)");
+  const parts = chunksOf(cleanResponse(html) || "(done)");
   let first = true;
   for (const p of parts) {
     const safe = sanitizeTgHtml(p);
@@ -291,12 +291,12 @@ function makeStatus() {
     },
     text() {
       switch (phase) {
-        case "think": return "Думаю...";
-        case "search": return "Ищу источники...";
-        case "found": return sources > 0 ? `Нашёл ${sources}, читаю...` : "Ищу источники...";
-        case "read": return "Читаю...";
-        case "extract": return "Извлекаю информацию...";
-        case "work": return detail ? `Делаю (${detail})...` : "Работаю...";
+        case "think": return "Думаю";
+        case "search": return "Ищу источники";
+        case "found": return sources > 0 ? `Нашёл ${sources}, читаю` : "Ищу источники";
+        case "read": return "Читаю";
+        case "extract": return "Извлекаю информацию";
+        case "work": return detail ? `Делаю (${detail})` : "Работаю";
         case "approval": return "Нужно подтверждение — кнопки выше";
       }
     },
@@ -513,8 +513,9 @@ async function startRun(args: {
     ? setInterval(() => {
         void (async () => {
           if (controller.signal.aborted) return;
-          const body = output ? output.slice(-4000) : st.text();
-          await pushDraft(body);
+          // No canned status words: native Thinking… placeholder until real
+          // text streams, then the live answer itself.
+          await pushDraft(output ? output.slice(-4000) : "");
         })();
       }, 1200)
     : undefined;
@@ -681,7 +682,7 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
   const isPrivate = msg.chat.type === "private";
   const thinking = isPrivate
     ? undefined
-    : (await tg("sendMessage", { chat_id: chatId, text: "Думаю..." }).catch(() => undefined) as { message_id?: number } | undefined);
+    : (await tg("sendMessage", { chat_id: chatId, text: "Думаю" }).catch(() => undefined) as { message_id?: number } | undefined);
   const thinkingId = thinking?.message_id;
   
   try {
@@ -871,7 +872,7 @@ async function handleMessage(msg: TgMessage) {
   const pm = msg.chat.type === "private";
   const thinking = pm
     ? undefined
-    : (await tg("sendMessage", { chat_id: msg.chat.id, text: "Думаю..." }).catch(() => undefined) as { message_id?: number } | undefined);
+    : (await tg("sendMessage", { chat_id: msg.chat.id, text: "Думаю" }).catch(() => undefined) as { message_id?: number } | undefined);
   const thinkingId = thinking?.message_id;
 
   const conv = await ensureConv(userId, bot.id);
@@ -958,6 +959,11 @@ async function handleInlineQuery(q: NonNullable<TgUpdate["inline_query"]>) {
   inlineAbort.set(q.from.id, controller);
   const conv = await ensureConv(acc.user_id, bot.id);
   let answer = "";
+  let timedOut = false;
+  const deadline = setTimeout(() => {
+    timedOut = true;
+    controller.abort("deadline");
+  }, 25000);
   try {
     await runAgent({
       userId: acc.user_id,
@@ -975,9 +981,12 @@ async function handleInlineQuery(q: NonNullable<TgUpdate["inline_query"]>) {
   } catch (e) {
     if (!isAbortError(e)) answer = `Ошибка: ${String(e).slice(0, 300)}`;
   } finally {
+    clearTimeout(deadline);
     if (inlineAbort.get(q.from.id) === controller) inlineAbort.delete(q.from.id);
   }
-  if (controller.signal.aborted || !answer) return;
+  if (controller.signal.aborted && controller.signal.reason !== "deadline") return;
+  if (!answer.trim()) return;
+  if (timedOut) answer += "\n\n<i>Думаю дальше — полное продолжение по кнопке ниже.</i>";
   inlineCache.set(cacheKey, { at: Date.now(), answer, mode });
   if (inlineCache.size > 200) {
     const first = inlineCache.keys().next().value;
@@ -997,14 +1006,15 @@ async function handleInlineQuery(q: NonNullable<TgUpdate["inline_query"]>) {
 }
 
 function guestArticle(title: string, body: string) {
-  const safe = sanitizeTgHtml((body || "(empty)").slice(0, 4000));
+  const clean = cleanResponse(body) || "(empty)";
+  const safe = sanitizeTgHtml(clean.slice(0, 4000));
   const useHtml = balancedHtml(safe);
-  const text = (useHtml ? safe : stripTags(body || "(empty)")).slice(0, 4000);
+  const text = (useHtml ? safe : stripTags(clean)).slice(0, 4000);
   return {
     type: "article",
     id: `janus-${Math.random().toString(36).slice(2, 10)}`,
     title,
-    description: stripTags(body).slice(0, 80) || "Janus",
+    description: stripTags(clean).slice(0, 80) || "Janus",
     input_message_content: { message_text: text, ...(useHtml ? { parse_mode: "HTML" } : {}) },
   };
 }

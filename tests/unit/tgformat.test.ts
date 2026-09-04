@@ -1,6 +1,17 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { balancedHtml, chunksOf, markdownToHtml, sanitizeTgHtml, stripTags } from "../../services/api/src/tgformat.js";
+import { balancedHtml, chunksOf, cleanResponse, markdownToHtml, sanitizeTgHtml, stripTags } from "../../services/api/src/tgformat.js";
+
+describe("cleanResponse", () => {
+  it("strips control tokens and junk prefixes", () => {
+    assert.equal(cleanResponse("<|open|>responseПривет!"), "Привет!");
+    assert.equal(cleanResponse("output: done"), "done");
+    assert.equal(cleanResponse("Ответ: всё готово"), "всё готово");
+  });
+  it("trims filler ellipsis lines", () => {
+    assert.equal(cleanResponse("...\n\nТекст\n…"), "Текст");
+  });
+});
 
 describe("markdownToHtml", () => {
   it("converts bold, italic, strike, code, links", () => {

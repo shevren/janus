@@ -12,6 +12,23 @@ export function stripTags(s: string): string {
     .replace(/&quot;/g, '"');
 }
 
+/**
+ * Scrub model output junk before delivery:
+ * - leaked control tokens like <|open|>, <|close|>
+ * - leading labels like "response", "output:", "Ответ:"
+ * - filler ellipsis lines ("...", "…", "эээ")
+ */
+export function cleanResponse(src: string): string {
+  let s = src.replace(/<\|[^|<>]{1,40}\|>/g, "");
+  const lines = s.split("\n");
+  while (lines.length && /^[\s.…\-–—]+$/.test(lines[0])) lines.shift();
+  while (lines.length && /^[\s.…\-–—]+$/.test(lines[lines.length - 1])) lines.pop();
+  s = lines.join("\n");
+  s = s.replace(/^(?:response|output|answer|result|результат|ответ)(?:\s*[:\-–—]\s*|\s+(?=[^\s])|(?=[A-ZА-ЯЁ]))/i, "");
+  s = s.replace(/[ \t]*\n{3,}/g, "\n\n");
+  return s.trim();
+}
+
 /** Convert leftover Markdown into Telegram HTML before sanitizing. */
 export function markdownToHtml(src: string): string {
   let s = src;

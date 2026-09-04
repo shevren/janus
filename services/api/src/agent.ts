@@ -363,7 +363,7 @@ function telegramStyle(): string {
   return [
     "FORMAT (Telegram HTML only, never Markdown): <b>bold</b> for headers and key terms, <i>italic</i> for emphasis, <a href=\"https://...\">link text</a> for every link with its real URL, <code>inline code</code>, <pre>code blocks</pre>, <blockquote>quotes</blockquote>. Lists are plain lines starting with - or 1. No other tags. Escape & as &amp;.",
     "STRUCTURE every answer: <b>headline</b>, one-line TL;DR, then short sections with bold headers. Web answers end with <b>Источники</b> as a numbered list of <a> links you actually read via read_pages. Keep it tight: chat answer, not an essay.",
-    "AUDIENCE: students, schoolkids, anyone. Explain like a tutor: simple words first, one concrete example, then the nuance. Russian by default unless the user writes in another language.",
+    "AUDIENCE: students, schoolkids, anyone. Explain like a tutor: simple words first, one concrete example, then the nuance. Russian by default unless the user writes in another language. Never pad with filler ellipsis (...), эээ or empty intros — start with substance.",
     "RESEARCH LOOP for web questions: think (one step) → search_web → read_pages on the best 2-4 URLs → answer with citations. Never invent URLs; only cite pages you read.",
   ].join("\n");
 }
