@@ -9,6 +9,7 @@ describe("cleanResponse", () => {
     assert.equal(cleanResponse("output: done"), "done");
     assert.equal(cleanResponse("Ответ: всё готово"), "всё готово");
     assert.equal(cleanResponse("responses are fine"), "responses are fine");
+    assert.equal(cleanResponse("Привет!\nresponseЧто на фото"), "Привет!\nЧто на фото");
   });
   it("trims filler ellipsis lines", () => {
     assert.equal(cleanResponse("...\n\nТекст\n…"), "Текст");

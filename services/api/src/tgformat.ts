@@ -24,10 +24,21 @@ export function cleanResponse(src: string): string {
   while (lines.length && /^[\s.…\-–—]+$/.test(lines[0])) lines.shift();
   while (lines.length && /^[\s.…\-–—]+$/.test(lines[lines.length - 1])) lines.pop();
   s = lines.join("\n");
-  const label = s.match(/^(response|output|answer|result|результат|ответ)([\s\S]*)$/i);
-  if (label && (/^(?:\s*[:\-–—]+\s*|\s+|$)/.test(label[2]) || /^[A-ZА-ЯЁ]/.test(label[2]))) {
-    s = label[2].replace(/^\s*[:\-–—]+\s*/, "");
-  }
+  // Labels can hide after a greeting line ("Привет!\nresponseЧто..."): scrub
+  // the first few non-empty lines, keep the rest untouched.
+  let seen = 0;
+  s = s
+    .split("\n")
+    .map((line) => {
+      if (seen >= 3 || !line.trim()) return line;
+      seen++;
+      const label = line.match(/^(response|output|answer|result|результат|ответ)([\s\S]*)$/i);
+      if (label && (/^(?:\s*[:\-–—]+\s*|\s+|$)/.test(label[2]) || /^[A-ZА-ЯЁ]/.test(label[2]))) {
+        return label[2].replace(/^\s*[:\-–—]+\s*/, "");
+      }
+      return line;
+    })
+    .join("\n");
   s = s.replace(/[ \t]*\n{3,}/g, "\n\n");
   return s.trim();
 }

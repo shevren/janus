@@ -765,7 +765,7 @@ async function handleCommand(msg: TgMessage, cmd: string, args: string) {
 
     if (cmd === "/help") {
       if (thinkingId) await deleteMessage(chatId, thinkingId);
-      await send(chatId, "Janus — твой агент везде. В любом чате без добавления: просто упомяни @JanusWorkBot с вопросом — отвечу сам (guest), либо @JanusWorkBot <запрос> и выбери результат (inline). На фото отвечай reply + упоминание, можно альбомом. С ботом в группе: /ask /plan /build или упомяни меня. В личке: просто пиши, файлы и фото — в inbox. Документы (pdf/docx/pptx) прикрепляю сам. MCP и скиллы: попроси «установи MCP X» — найду и поставлю. Секретарь для своих чатов: /secretary on.");
+      await send(chatId, "Janus — твой агент везде. В чужом чате: reply на сообщение + @JanusWorkBot с вопросом — отвечу следующим сообщением (ничего не выбирай из плашек). Для отправки от своего имени: @JanusWorkBot <запрос> в поле ввода и выбери результат. На фото конспекта: reply + «@JanusWorkBot сделай конспект», можно альбомом. С ботом в группе: /ask /plan /build или упомяни меня. В личке: просто пиши, файлы и фото — в inbox. Документы и видео прикрепляю сам. MCP и скиллы: попроси «установи MCP X». Секретарь: /secretary on.");
       return;
     }
     if (cmd === "/model") {

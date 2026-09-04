@@ -117,23 +117,28 @@ function computerTools(): ToolSpec[] {
       description: "Read visible text from the current browser page.",
       parameters: { type: "object", properties: {} },
     },
-    {
-      name: "compose_cut",
-      description: "Write a photo/video cut spec under /workspace/cuts. Remotion export is a later queued job.",
-      parameters: {
-        type: "object",
-        properties: {
-          name: { type: "string" },
-          clips: { type: "array", items: { type: "object" } },
-        },
-        required: ["name", "clips"],
-      },
-    },
   ];
+}
+
+function composeCutTool(): ToolSpec {
+  return {
+    name: "compose_cut",
+    description:
+      "Montage video/audio by code: pass clips [{file: /workspace path, start?: seconds, duration?: seconds}] and get back a rendered cuts/<name>.mp4 (ffmpeg trim+concat, file auto-attached). Use for cuts, compilations, voice-over slideshows.",
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string" },
+        clips: { type: "array", items: { type: "object" } },
+      },
+      required: ["name", "clips"],
+    },
+  };
 }
 
 function sharedTools(searchDesc: string): ToolSpec[] {
   return [
+    composeCutTool(),
     {
       name: "search_web",
       description: `${searchDesc} Returns numbered results with full URLs. Always follow with read_pages on the best 2-4 URLs before answering from the web.`,
@@ -224,7 +229,7 @@ function sharedTools(searchDesc: string): ToolSpec[] {
     {
       name: "analyze_image",
       description:
-        "Read text, formulas and content from workspace images (OCR-like). Path can be one file or several comma-separated (e.g. lecture photo sets — pass them all at once). Empty path looks at the live screen instead.",
+        "STRICT OCR: transcribes text and formulas from workspace images, nothing else. Path can be one file or several comma-separated (lecture sets — pass all at once). Empty path looks at the live screen. Do not use for scene/people description.",
       parameters: {
         type: "object",
         properties: { path: { type: "string" }, prompt: { type: "string" } },
@@ -342,7 +347,7 @@ function modePrompt(surface: Surface, mode: AgentMode): string {
   const lines = [
     "You are a general agent for this person: daily life (search, study, time, units, chat) and software work (workspace files, GitHub, shell, skills, MCP). You are not a chatbot wrapper. You do the work.",
     surface === "telegram"
-      ? "This turn is Telegram. You have no computer_* tools, no read_page, no compose_cut. Web research is search_web (numbered results with URLs) then read_pages (full text)."
+      ? "This turn is Telegram. You have no computer_* tools and no read_page. Web research is search_web (numbered results with URLs) then read_pages (full text). Video montage works via compose_cut."
       : "You work on a shared computer: browser, /workspace files, and a shell. Prefer read_page after computer_open.",
   ];
   if (mode === "plan") {
@@ -553,6 +558,55 @@ async function shrinkImage(buf: Buffer, mime: string): Promise<[Buffer, string]>
   } catch {
     return [buf, mime];
   }
+}
+
+/**
+ * Real video montage: trim each clip and concat into cuts/<name>.mp4.
+ * Clips: [{file: /workspace/..., start?: sec, duration?: sec}].
+ */
+async function renderCut(
+  userId: string,
+  args: Record<string, unknown>,
+  onFile?: (rel: string) => void,
+): Promise<{ output: string }> {
+  const nameHint = String(args.name ?? "cut").replace(/[^\w.-]+/g, "-").slice(0, 40) || "cut";
+  const clips = (Array.isArray(args.clips) ? args.clips : []) as Record<string, unknown>[];
+  const clean = clips
+    .map((c) => ({
+      file: String(c.file ?? "").replace(/\.\./g, "").replace(/^\/workspace\//, "").replace(/^\/+/, ""),
+      start: Math.max(0, Number(c.start ?? 0) || 0),
+      duration: Number(c.duration ?? 0) || 0,
+    }))
+    .filter((c) => c.file && /\.(mp4|mov|mkv|webm|mp3|wav|m4a|jpg|jpeg|png)$/i.test(c.file))
+    .slice(0, 10);
+  if (!clean.length) return { output: "No valid clips. Each clip needs file: /workspace/... (mp4/mov/mp3/jpg/png) with optional start/duration seconds." };
+  const q = (s: string) => `"${s.replace(/"/g, "")}"`;
+  const tmp = `cuts/tmp-${Date.now()}`;
+  const parts: string[] = [];
+  for (let i = 0; i < clean.length; i++) {
+    const c = clean[i];
+    const isImg = /\.(jpg|jpeg|png)$/i.test(c.file);
+    const dur = c.duration > 0 ? c.duration : isImg ? 3 : 0;
+    const seek = c.start > 0 ? `-ss ${c.start}` : "";
+    const t = dur > 0 ? `-t ${dur}` : "";
+    // Normalize to 720p h264/aac so concat never fights codecs.
+    const vf = isImg ? `-loop 1 -framerate 30 -t ${dur}` : "";
+    const cmd =
+      `cd /workspace && mkdir -p ${q(tmp)} && ffmpeg -y ${vf} ${seek} -i ${q(c.file)} ${t} ` +
+      `-vf scale=1280:-2 -c:v libx264 -preset veryfast -crf 23 -c:a aac -shortest ${q(`${tmp}/p${i}.mp4`)} 2>&1 | tail -3`;
+    const out = await box.shell(userId, cmd);
+    parts.push(out.slice(-300));
+  }
+  const list = parts.map((_, i) => `file '${tmp}/p${i}.mp4'`).join("\n");
+  box.writeFile(userId, `${tmp}/list.txt`, list);
+  const target = `cuts/${nameHint}.mp4`;
+  const fin = await box.shell(userId, `cd /workspace && ffmpeg -y -f concat -safe 0 -i ${q(`${tmp}/list.txt`)} -c copy ${q(target)} 2>&1 | tail -3 && ls ${q(target)}`);
+  await box.shell(userId, `cd /workspace && rm -rf ${q(tmp)} 2>&1`);
+  if (fin.trim().split("\n").pop()?.trim() === target) {
+    onFile?.(target);
+    return { output: `Video rendered: /workspace/${target} (${clean.length} clips)` };
+  }
+  return { output: `Render failed (needs ffmpeg): ${fin.slice(-400)}` };
 }
 
 /** Styled HTML for generated PDFs (weasyprint, DejaVu covers Cyrillic). */
@@ -828,12 +882,17 @@ echo written`);
       if (!provider) return { output: "No model provider is configured." };
       const raw = Array.isArray(args.path) ? args.path.map(String) : String(args.path ?? "").split(/[\s,]+/);
       const rels = [...new Set(raw.map((s) => s.trim()).filter(Boolean))].slice(0, 6);
-      const prompt = String(args.prompt ?? "");
+      const given = String(args.prompt ?? "").trim();
+      // OCR-only default: transcribe text and formulas exactly, never invent
+      // scenes or people. If nothing readable is visible, say so plainly.
+      const prompt =
+        given ||
+        "Transcribe ALL visible text and formulas character-exact, preserving layout order. Then one line on layout (handwritten/printed/table). If no text or formulas are visible, reply exactly: NO_TEXT_VISIBLE. Never describe people, events or scenes.";
       const look = async (rel: string) => {
         const buf = box.readBytes(userId, rel);
         const [small, mime] = await shrinkImage(buf, box.imageMime(rel));
         const text = await lookImage(provider, small, mime, prompt);
-        return `--- ${rel} ---\n${text || "(empty look)"}`;
+        return `--- ${rel} (${Math.round(small.byteLength / 1024)}KB sent) ---\n${text || "(empty look)"}`;
       };
       if (!rels.length) {
         const buf = await box.snapshot(userId);
@@ -845,15 +904,7 @@ echo written`);
       return { output: parts.join("\n\n") };
     }
     if (name === "compose_cut") {
-      const nameHint = String(args.name ?? "cut").replace(/[^\w.-]+/g, "-");
-      const spec = {
-        name: nameHint,
-        clips: args.clips ?? [],
-        created_at: new Date().toISOString(),
-      };
-      const rel = `cuts/${nameHint}.json`;
-      box.writeFile(userId, rel, JSON.stringify(spec, null, 2));
-      return { output: `wrote /workspace/${rel}. Remotion render is queued later so it does not fight the browser.` };
+      return renderCut(userId, args, onFile);
     }
     if (name === "shell") {
       return { output: await box.shell(userId, String(args.command ?? "")) };
